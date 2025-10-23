@@ -1,8 +1,6 @@
 from __future__ import annotations
 import os
 from dotenv import load_dotenv
-
-# 👇 CARGA .env ANTES DE TODO LO QUE LO USE
 load_dotenv(override=True)
 
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException
@@ -19,6 +17,7 @@ app = FastAPI(title="Groq RAG Server", docs_url="/swagger")
 
 class ChatRequest(BaseModel):
     message: str
+    topic: str | None = None
 
 class ChatResponse(BaseModel):
     reply: str
@@ -31,7 +30,11 @@ def health():
 
 @app.post("/chat", response_model=ChatResponse)
 def chat(req: ChatRequest):
-    reply, metas, apa = generate_answer(req.message)
+    reply, metas, apa = generate_answer(
+        req.message,
+        topic=req.topic,          
+        lang=req.lang,
+    )
     return ChatResponse(reply=reply, citations=metas, citations_apa=apa)
 
 @app.post("/ingest")

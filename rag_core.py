@@ -20,19 +20,23 @@ def _chat(messages, model, **opts):
 
 
 # --- Palabras clave y temas reconocidos ---
-_HEALTH_KEYWORDS = {"salud", "síntoma", "diagnóstico", "enfermedad", "síndrome", "genética", "tratamiento"}
+_HEALTH_KEYWORDS = {
+    "salud", "síntoma", "sintoma", "diagnóstico", "diagnostico",
+    "enfermedad", "síndrome", "sindrome", "genética", "genetica",
+    "tratamiento", "prevención", "prevencion"
+}
+
 _DISEASE_ALIASES = {
     r"\bdown\b": "down",
     r"\bwilliams\b": "williams",
     r"\bmps\b": "mps",
-    r"\bmucopolisacaridos(?:is|es)?\b": "mps",        # mucopolisacaridosis / mucopolisacaridoses
-    r"\b(mucopolisacaridosis|mucopolisacaridosis)\b": "mps",  # redundante por compatibilidad
-    r"\bhurler\b": "mps",     # MPS I
-    r"\bhunter\b": "mps",     # MPS II
-    r"\bsanfilippo\b": "mps", # MPS III
-    r"\bmorquio\b": "mps",    # MPS IV
+    r"\bmucopolisacaridos(?:is|es)?\b": "mps",      # mucopolisacaridosis / mucopolisacaridoses
+    r"\bmucopolisacaridosis\b": "mps",
+    r"\bhurler\b": "mps",       # MPS I
+    r"\bhunter\b": "mps",       # MPS II
+    r"\bsanfilippo\b": "mps",   # MPS III
+    r"\bmorquio\b": "mps",      # MPS IV
 }
-
 
 # --- Gemi: personalidad del asistente ---
 _GEMI_NAME = "Gemi"
@@ -41,8 +45,8 @@ _GREET_WORDS = {
     "hey", "hi", "hello", "qué tal", "que tal"
 }
 _SMALLTALK_WORDS = {
-    "cómo estás", "como estas", "que haces", "qué haces", "cómo va", "como va",
-    "gracias", "ok", "vale"
+    "cómo estás", "como estas", "que haces", "qué haces",
+    "cómo va", "como va", "gracias", "ok", "vale"
 }
 
 def _is_greeting(t: str) -> bool:
@@ -56,7 +60,7 @@ def _is_smalltalk(t: str) -> bool:
 
 # --- Funciones auxiliares ---
 def _is_health_related(text: str) -> bool:
-    t = text.lower()
+    t = (text or "").lower()
     if any(kw in t for kw in _HEALTH_KEYWORDS):
         return True
     return _extract_topic(t) is not None
@@ -67,24 +71,39 @@ def _extract_topic(text: str) -> str | None:
             return topic
     return None
 
-def _tidy_output(text: str, max_sentences: int = 8) -> str:
+def _tidy_output(text: str, max_sentences: int = 10) -> str:
+    """Limpia salida, normaliza viñetas y evita frases pegadas/cortadas."""
     if not text:
         return text
+    # * -> viñetas
+    text = re.sub(r"(?m)^\s*\*\s+", "• ", text)
+    # separa frases que quedaron pegadas al pasar de línea
+    text = re.sub(r"([a-záéíóúñ])\s+([A-ZÁÉÍÓÚÑ])", r"\1. \2", text)
+    # espacios repetidos
     text = re.sub(r"\s{2,}", " ", text).strip()
+    # limitar longitud por oraciones
     sents = re.split(r"(?<=[\.\?\!])\s+", text)
-    return " ".join(sents[:max_sentences]).strip()
+    text = " ".join(sents[:max_sentences]).strip()
+    if text and text[-1] not in ".!?":
+        text += "."
+    return text
 
 def _generic_definition(topic: str | None) -> str | None:
     if topic == "down":
-        return "El síndrome de Down es un trastorno genético causado por la trisomía del cromosoma 21."
+        return ("El síndrome de Down es un trastorno genético causado por la "
+                "trisomía del cromosoma 21.")
     if topic == "williams":
-        return "El síndrome de Williams es una enfermedad genética causada por una microdeleción en 7q11.23."
+        return ("El síndrome de Williams es una enfermedad genética por "
+                "microdeleción en 7q11.23, con rasgos faciales típicos y "
+                "frecuente afectación cardiovascular.")
     if topic == "mps":
-        return "Las mucopolisacaridosis (MPS) son trastornos metabólicos hereditarios por déficit enzimático lisosomal."
+        return ("Las mucopolisacaridosis (MPS) son trastornos lisosomales por "
+                "déficit enzimático que impide degradar glucosaminoglucanos; "
+                "cursan con afectación multisistémica progresiva.")
     return None
 
 
-# --- Lógica principal del asistente ---
+# --- Construcción de filtros para el RAG (BM25) ---
 def _compose_where(topic: str | None = None,
                    lang: str | None = None,
                    min_year: int | None = None,
@@ -102,7 +121,10 @@ def _compose_where(topic: str | None = None,
         return None
     return parts[0] if len(parts) == 1 else {"$and": parts}
 
-def generate_answer(user_msg: str, topic: str | None = None,
+
+# --- Generación de respuesta ---
+def generate_answer(user_msg: str,
+                    topic: str | None = None,
                     min_year: int | None = None,
                     types: list[str] | None = None,
                     lang: str | None = None):
@@ -112,37 +134,43 @@ def generate_answer(user_msg: str, topic: str | None = None,
     if _is_smalltalk(t):
         return (
             f"¡Hola! Soy {_GEMI_NAME}, tu asistente para dudas sobre enfermedades raras. "
-            "¿Qué te gustaría saber? Puedo ayudarte con síndrome de Down, Williams o mucopolisacaridosis (MPS).",
+            "¿Qué te gustaría saber? Puedo ayudarte con síndrome de Down, Williams o MPS.",
             [], []
         )
 
     inferred = _extract_topic(t)
+
+    # Si no hay señales médicas NI topic dado (p.ej., repregunta sin contexto)
     if not _is_health_related(t) and not (topic or inferred):
         return (
             "Me centro en enfermedades raras y educación en salud. "
-            "Tu pregunta parece fuera de contexto.", [], []
+            "¿Podrías indicarme si te refieres a Down, Williams o MPS?",
+            [], []
         )
 
     effective_topic = topic or inferred
-
-    # 🔎 Filtro por metadatos (clave: evitar cruzar Down vs Williams)
     where = _compose_where(topic=effective_topic, lang=lang, min_year=min_year, types=types)
 
+    # Recuperar contexto con BM25 filtrado
     rag_text, metas = bm25_query(t, k=5, where=where)
 
-    # Si NO hay documentos del topic pedido, NO cites otros (evita cruces)
+    # Si no hay docs del tema → fallback educativo honesto
     if not rag_text:
         generic = _generic_definition(effective_topic)
         if generic:
-            generic += " (Información general; no reemplaza consejo médico ni sirve para diagnosticar)."
+            generic += " (Respuesta de conocimiento general; no tengo documentos locales para citar aún)."
             return (generic, [], [])
-        return ("No cuento con fuentes locales para ese tema todavía. Intenta subir un documento relacionado y vuelve a preguntar.", [], [])
+        return (
+            "No tengo documentos locales para ese tema todavía. "
+            "Puedes subir un PDF relacionado con /ingest y volver a preguntar.",
+            [], []
+        )
 
     SYSTEM_PROMPT = (
-        "Eres un asistente educativo de salud llamado 'Gemi', especializado en enfermedades raras. "
-        "Responde siempre en español, de forma amable y breve (4 a 8 oraciones). "
-        "Explica definición y manifestaciones frecuentes (viñetas si aplica) y orientación general. "
-        "No realices diagnósticos personales ni recomiendes tratamientos/dosis."
+        "Eres un asistente educativo de salud llamado 'Gemi', especializado en enfermedades raras.\n"
+        "Responde SIEMPRE en español, con tono claro y amable, en 4–8 oraciones.\n"
+        "Cuando listes manifestaciones, usa viñetas con '• ' al inicio de cada línea.\n"
+        "No hagas diagnósticos personalizados ni indiques dosis. Termina con una nota breve de seguridad."
     )
 
     messages = [
@@ -154,15 +182,15 @@ def generate_answer(user_msg: str, topic: str | None = None,
     out = _chat(messages, _LLM_MODEL, temperature=0.10, num_predict=220, top_p=0.9)
     raw = (out.get("message") or {}).get("content", "").strip()
     reply = _tidy_output(raw)
-    citations_apa = bm25_apa(metas)
 
+    citations_apa = bm25_apa(metas)
     if reply:
         reply += " (Contenido educativo; no sustituye evaluación médica)."
 
     return reply or "No pude generar respuesta en este momento.", metas, citations_apa
 
 
-# --- Reexportaciones ---
+# --- Reexportaciones (API pública del módulo) ---
 upsert_document = bm25_upsert
 list_docs = bm25_list
 doc_stats = bm25_stats
