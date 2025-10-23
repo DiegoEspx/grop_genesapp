@@ -1,88 +1,94 @@
 from __future__ import annotations
-import os
-from dotenv import load_dotenv
-load_dotenv(override=True)
-
-from fastapi import FastAPI, UploadFile, File, Form, HTTPException
+from fastapi import FastAPI, UploadFile, File, Form
+from pydantic import BaseModel
 from pypdf import PdfReader
 from io import BytesIO
-from pydantic import BaseModel
+from dotenv import load_dotenv
 
 from rag_core import (
     upsert_document, generate_answer,
     delete_document, doc_stats, list_docs,
 )
 
+load_dotenv(override=True)
+
 app = FastAPI(title="Groq RAG Server", docs_url="/swagger")
 
+# -------- MODELOS --------
 class ChatRequest(BaseModel):
     message: str
-    topic: str | None = None
+    topic: str | None = None       
+    lang: str | None = "es"        
 
 class ChatResponse(BaseModel):
     reply: str
     citations: list | None = None
     citations_apa: list | None = None
 
+# -------- ENDPOINTS --------
 @app.get("/health")
 def health():
     return {"status": "ok", "backend": "groq"}
 
 @app.post("/chat", response_model=ChatResponse)
 def chat(req: ChatRequest):
+    # acceso tolerante por si alguna versión antigua del cliente no manda lang/topic
+    topic = (req.topic if hasattr(req, "topic") else None)
+    lang  = (req.lang  if hasattr(req, "lang")  else "es")
+
     reply, metas, apa = generate_answer(
         req.message,
-        topic=req.topic,          
-        lang=req.lang,
+        topic=topic,
+        lang=lang,
     )
     return ChatResponse(reply=reply, citations=metas, citations_apa=apa)
 
 @app.post("/ingest")
 def ingest(
     file: UploadFile = File(...),
-    doc_id: str = Form(None),
-    topic: str = Form(None),
-    year: int = Form(None),
-    type: str = Form(None),
-    lang: str = Form(None),
-    country: str = Form(None),
-    doi: str = Form(None),
-    url: str = Form(None),
-    title: str = Form(None),
+    doc_id: str | None = Form(None),
+    topic: str | None = Form(None),
+    lang: str | None = Form(None),
+    year: int | None = Form(None),
+    type: str | None = Form(None),
+    country: str | None = Form(None),
+    title: str | None = Form(None),
+    doi: str | None = Form(None),
+    url: str | None = Form(None),
 ):
     name = file.filename or "unknown"
     doc_id = doc_id or name
     raw = file.file.read()
-    reader = PdfReader(BytesIO(raw))
-    text = "\n".join([(p.extract_text() or "") for p in reader.pages]).strip()
-    if not text:
-        raise HTTPException(status_code=422, detail="No se extrajo texto (¿PDF escaneado sin OCR?).")
+    text = "\n".join([(p.extract_text() or "") for p in PdfReader(BytesIO(raw)).pages])
 
-    # metadatos enriquecidos
-    extra = {
-        "topic": topic,
+    # limpia placeholders típicos de Swagger
+    def _clean(v):
+        if v is None: return None
+        s = str(v).strip().lower()
+        return None if s in {"", "string", "none", "null"} else v
+
+    meta = {
+        "topic": _clean(topic),
+        "lang": _clean(lang),
         "year": year,
-        "type": type,
-        "lang": lang,
-        "country": country,
-        "doi": doi,
-        "url": url,
-        "title": title or name,  # mostrar título/archivo en citas
-        "source_name": name,     # para mostrar siempre el nombre del archivo
+        "type": _clean(type),
+        "country": _clean(country),
+        "title": _clean(title) or doc_id,
+        "doi": _clean(doi),
+        "url": _clean(url),
+        "source_name": name,
     }
-    # limpia None
-    extra = {k: v for k, v in extra.items() if v is not None}
+    # quita None
+    meta = {k: v for k, v in meta.items() if v is not None}
 
     count = upsert_document(
         doc_id=doc_id,
         source=f"upload:{name}",
         full_text=text,
-        extra_meta=extra,
-        topic=topic,
-        replace=True,
+        extra_meta=meta,
+        topic=meta.get("topic"),
     )
-    return {"ok": True, "chunks_indexed": count, "doc_id": doc_id, "meta": extra}
-
+    return {"ok": True, "chunks_indexed": count, "doc_id": doc_id}
 
 @app.get("/docs")
 def docs_list():
