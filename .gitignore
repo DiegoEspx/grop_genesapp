@@ -1,0 +1,51 @@
+# --- Archivos de entorno y configuración ---
+.env
+.env.local
+.env.*.local
+
+# --- Entorno virtual ---
+venv/
+.env/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.pdb
+
+# --- Archivos temporales ---
+*.log
+*.tmp
+*.swp
+*.bak
+.DS_Store
+Thumbs.db
+
+# --- Archivos de base de datos locales ---
+bm25_docs.jsonl
+*.db
+*.sqlite3
+
+# --- Archivos de sistema ---
+.idea/
+.vscode/
+*.code-workspace
+
+# --- Archivos de distribución / build ---
+build/
+dist/
+*.egg-info/
+*.egg
+*.whl
+
+# --- Archivos de test / caché ---
+.coverage
+htmlcov/
+.cache/
+pytest_cache/
+.pytest_cache/
+
+# --- Archivos de tu app ---
+# Evita subir documentos confidenciales o PDFs usados en pruebas
+*.pdf
+uploads/
+data/

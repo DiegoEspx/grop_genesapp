@@ -1,0 +1,26 @@
+# === API / Server ===
+fastapi==0.114.2
+uvicorn[standard]==0.30.6
+python-dotenv==1.0.1
+pydantic==2.9.2
+requests==2.32.3
+python-multipart==0.0.9
+
+# === PDF ===
+pypdf==4.3.1
+
+# === RAG liviano (sin embeddings) ===
+rank-bm25==0.2.2
+
+# === Groq (LLM en la nube) ===
+groq>=0.13.0
+
+# === Tu stack previo (lo conservo) ===
+chromadb==1.1
+ollama==0.3.3
+
+# === Supabase (lo sigues usando) ===
+supabase>=2.5.0
+
+# === Compatibilidad Windows (tu línea original) ===
+numpy>=2.0 ; platform_system == "Windows"
