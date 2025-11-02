@@ -23,19 +23,20 @@ def _chat(messages, model, **opts):
 _HEALTH_KEYWORDS = {
     "salud", "síntoma", "sintoma", "diagnóstico", "diagnostico",
     "enfermedad", "síndrome", "sindrome", "genética", "genetica",
-    "tratamiento", "prevención", "prevencion"
+    "tratamiento", "prevención", "prevencion", "terapia", "cuidado",
+    "manifestación", "manifestacion", "característica", "caracteristica"
 }
 
 _DISEASE_ALIASES = {
     r"\bdown\b": "down",
     r"\bwilliams\b": "williams",
     r"\bmps\b": "mps",
-    r"\bmucopolisacaridos(?:is|es)?\b": "mps",      # mucopolisacaridosis / mucopolisacaridoses
+    r"\bmucopolisacaridos(?:is|es)?\b": "mps",
     r"\bmucopolisacaridosis\b": "mps",
-    r"\bhurler\b": "mps",       # MPS I
-    r"\bhunter\b": "mps",       # MPS II
-    r"\bsanfilippo\b": "mps",   # MPS III
-    r"\bmorquio\b": "mps",      # MPS IV
+    r"\bhurler\b": "mps",
+    r"\bhunter\b": "mps",
+    r"\bsanfilippo\b": "mps",
+    r"\bmorquio\b": "mps",
 }
 
 # --- Gemi: personalidad del asistente ---
@@ -71,7 +72,7 @@ def _extract_topic(text: str) -> str | None:
             return topic
     return None
 
-def _tidy_output(text: str, max_sentences: int = 10) -> str:
+def _tidy_output(text: str, max_sentences: int = 15) -> str:
     """Limpia salida, normaliza viñetas y evita frases pegadas/cortadas."""
     if not text:
         return text
@@ -109,9 +110,6 @@ def _compose_where(topic: str | None = None,
 
 
 # --- Generación de respuesta ---
-# El resto de imports, _chat, y funciones auxiliares permanecen igual...
-
-# --- Generación de respuesta ---
 def generate_answer(user_msg: str,
                     topic: str | None = None,
                     min_year: int | None = None,
@@ -122,18 +120,20 @@ def generate_answer(user_msg: str,
     # Small-talk / saludo
     if _is_smalltalk(t):
         return (
-            f"¡Hola! Soy {_GEMI_NAME}, tu asistente para dudas sobre enfermedades raras. "
-            "¿Qué te gustaría saber? Puedo ayudarte con síndrome de Down, Williams o MPS.",
+            f"¡Hola! Soy {_GEMI_NAME}, tu asistente especializado en enfermedades raras. "
+            "Puedo ayudarte con información sobre síndrome de Down, Williams y mucopolisacaridosis (MPS). "
+            "¿Qué te gustaría saber?",
             [], []
         )
 
     inferred = _extract_topic(t)
 
-    # Si no hay señales médicas NI topic dado (p.ej., repregunta sin contexto)
+    # Si no hay señales médicas NI topic dado
     if not _is_health_related(t) and not (topic or inferred):
         return (
-            "Me centro en enfermedades raras y educación en salud. "
-            "¿Podrías indicarme si te refieres a Down, Williams o MPS?",
+            "Me especializo en enfermedades raras y educación en salud genética. "
+            "¿Podrías indicarme sobre qué condición te gustaría información? "
+            "Puedo ayudarte con Down, Williams o MPS.",
             [], []
         )
 
@@ -141,72 +141,49 @@ def generate_answer(user_msg: str,
     where = _compose_where(topic=effective_topic, lang=lang, min_year=min_year, types=types)
 
     # Recuperar contexto con BM25 filtrado
-    rag_text, metas = bm25_query(t, k=7, where=where)
+    rag_text, metas = bm25_query(t, k=5, where=where)
 
-    # --------------------------------------------------------------------------------
-    # NUEVA LÓGICA DE FALLBACK (SI NO HAY DOCUMENTOS RAG)
-    # --------------------------------------------------------------------------------
-    if not rag_text:
-        # Usamos el LLM para una respuesta de conocimiento general ampliada
-        SYSTEM_PROMPT_FALLBACK = (
-            "Eres 'Gemi', un asistente educativo de salud, amable y experto. "
-            "Estás respondiendo a una pregunta sobre una enfermedad rara (Síndrome de Down, Williams o MPS). "
-            "**IMPORTANTE: No se han encontrado documentos locales (RAG).** Debes usar **solo tu conocimiento general** "
-            "para responder la pregunta. Responde de forma clara y concisa (4-8 oraciones). **No digas que no tienes documentos, simplemente responde con seguridad**. "
-            "Añade al final de tu respuesta la nota: '(Respuesta de conocimiento general, sin evidencia local)'. "
-            "No hagas diagnósticos. Si listes, usa viñetas '• '."
-        )
+    # NUEVO: Sistema de prompts mejorado que permite conocimiento general + documentos
+    SYSTEM_PROMPT = f"""Eres Gemi, un asistente médico educativo especializado en enfermedades raras, con amplio conocimiento en genética médica, pediatría y síndromes poco frecuentes.
 
-        messages = [
-            {"role": "system", "content": SYSTEM_PROMPT_FALLBACK},
-            {"role": "user", "content": "Pregunta: " + t}
-        ]
+INSTRUCCIONES CLAVE:
+1. Combina tu conocimiento médico general con la información de los documentos proporcionados
+2. Los documentos son una BASE para asegurar precisión, NO tu única fuente
+3. Puedes explicar conceptos, fisiopatología, epidemiología y manejo general usando tu conocimiento médico
+4. Cuando algo esté en los documentos, menciónalo como respaldo ("según la literatura...")
+5. Responde de forma natural, clara y educativa, como un médico explicando a un estudiante
+6. Usa 6-12 oraciones para respuestas completas
+7. Si explicas manifestaciones o tratamientos, usa viñetas con '• '
+8. NUNCA des diagnósticos personales ni dosis específicas
+9. Siempre responde en español
 
-        # Usamos el LLM para una respuesta de conocimiento general dinámica y no repetitiva
-        out = _chat(messages, _LLM_MODEL, temperature=0.35, num_predict=350, top_p=0.95)
-        raw = (out.get("message") or {}).get("content", "").strip()
-        reply = _tidy_output(raw)
-        return reply or "No pude generar una respuesta de conocimiento general en este momento.", [], []
-    
-    # --------------------------------------------------------------------------------
-    # FIN DE LA NUEVA LÓGICA DE FALLBACK
-    # --------------------------------------------------------------------------------
+TEMA ACTUAL: {effective_topic or "enfermedades raras en general"}
 
+Tu objetivo es EDUCAR de forma completa, no solo repetir documentos."""
 
-    # --------------------------------------------------------------------------------
-    # FLUJO CON RAG: Ahora con un SYSTEM_PROMPT más flexible
-    # --------------------------------------------------------------------------------
-    SYSTEM_PROMPT = (
-        "Eres Gemi, un **asistente educativo de salud** experto, amigable y muy entusiasta, "
-        "especializado en enfermedades raras como Síndrome de Down, Williams y MPS.\n"
-        "Tu misión es ofrecer respuestas completas y de alta calidad. **Combina tu conocimiento general** para el contexto y la fluidez, "
-        "y usa el **Contexto Recuperado (RAG)** como evidencia principal para datos específicos. No te limites solo a repetir los documentos.\n"
-        "Responde SIEMPRE en español, con un tono cálido y proactivo. Usa viñetas '• ' cuando listes síntomas o características.\n"
-        "No hagas diagnósticos, no indiques dosis ni tratamientos. **La respuesta debe ser concisa, idealmente 4-8 oraciones**.\n"
-        "Marca con [1], [2], ... los fragmentos del contexto recuperado cuando los uses."
-    )
-    
-    ctx_preview = "\n".join(rag_text.split("\n")[:7])  # 7 fragmentos/lineas como preview
+    # Si hay documentos, los usamos como contexto de respaldo
+    if rag_text:
+        context_section = f"\n\nDOCUMENTOS DE REFERENCIA (úsalos para validar y complementar tu conocimiento):\n{rag_text}"
+    else:
+        context_section = "\n\nNOTA: No hay documentos específicos cargados para este tema, pero puedes usar tu conocimiento médico general sobre enfermedades raras."
 
     messages = [
-        {"role": "system", "content": SYSTEM_PROMPT},
-        {"role": "system", "content": f"Contexto recuperado (fragmentos relevantes):\n{ctx_preview}"},
+        {"role": "system", "content": SYSTEM_PROMPT + context_section},
         {"role": "user", "content": t},
     ]
 
-    out = _chat(messages, _LLM_MODEL, temperature=0.35, num_predict=350, top_p=0.95)
+    # Aumentamos tokens para respuestas más completas
+    out = _chat(messages, _LLM_MODEL, temperature=0.35, num_predict=450, top_p=0.92)
     raw = (out.get("message") or {}).get("content", "").strip()
-    reply = _tidy_output(raw)
+    reply = _tidy_output(raw, max_sentences=15)
 
-    citations_apa = bm25_apa(metas)
-    if reply:
-        # Añadimos la nota de seguridad al final de las respuestas con RAG
-        if "No sustituye evaluación médica" not in reply:
-            reply += " (Contenido educativo; no sustituye evaluación médica)."
+    citations_apa = bm25_apa(metas) if metas else []
+    
+    # Nota de seguridad más natural
+    if reply and not any(x in reply.lower() for x in ["consulta", "médico", "profesional"]):
+        reply += "\n\nRecuerda: esta información es educativa. Para situaciones individuales, consulta con un profesional de la salud."
 
-    return reply or "No pude generar respuesta en este momento.", metas, citations_apa
-
-# ... Reexportaciones (API pública del módulo) permanecen igual...
+    return reply or "No pude generar una respuesta en este momento.", metas, citations_apa
 
 
 # --- Reexportaciones (API pública del módulo) ---
