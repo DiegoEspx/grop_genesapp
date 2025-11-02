@@ -88,20 +88,6 @@ def _tidy_output(text: str, max_sentences: int = 10) -> str:
         text += "."
     return text
 
-def _generic_definition(topic: str | None) -> str | None:
-    if topic == "down":
-        return ("El síndrome de Down es un trastorno genético causado por la "
-                "trisomía del cromosoma 21.")
-    if topic == "williams":
-        return ("El síndrome de Williams es una enfermedad genética por "
-                "microdeleción en 7q11.23, con rasgos faciales típicos y "
-                "frecuente afectación cardiovascular.")
-    if topic == "mps":
-        return ("Las mucopolisacaridosis (MPS) son trastornos lisosomales por "
-                "déficit enzimático que impide degradar glucosaminoglucanos; "
-                "cursan con afectación multisistémica progresiva.")
-    return None
-
 
 # --- Construcción de filtros para el RAG (BM25) ---
 def _compose_where(topic: str | None = None,
@@ -121,6 +107,9 @@ def _compose_where(topic: str | None = None,
         return None
     return parts[0] if len(parts) == 1 else {"$and": parts}
 
+
+# --- Generación de respuesta ---
+# El resto de imports, _chat, y funciones auxiliares permanecen igual...
 
 # --- Generación de respuesta ---
 def generate_answer(user_msg: str,
@@ -151,65 +140,73 @@ def generate_answer(user_msg: str,
     effective_topic = topic or inferred
     where = _compose_where(topic=effective_topic, lang=lang, min_year=min_year, types=types)
 
-    # Recuperar contexto con BM25 filtrado (pedimos un poco más de contexto para dar más material)
+    # Recuperar contexto con BM25 filtrado
     rag_text, metas = bm25_query(t, k=7, where=where)
 
-    # Si no hay docs del tema → fallback educativo honesto
+    # --------------------------------------------------------------------------------
+    # NUEVA LÓGICA DE FALLBACK (SI NO HAY DOCUMENTOS RAG)
+    # --------------------------------------------------------------------------------
     if not rag_text:
-        generic = _generic_definition(effective_topic)
-        if generic:
-            generic += " (Respuesta de conocimiento general; no tengo documentos locales para citar aún)."
-            return (generic, [], [])
-        return (
-            "No tengo documentos locales para ese tema todavía. "
-            "Puedes subir un PDF relacionado con /ingest y volver a preguntar.",
-            [], []
+        # Usamos el LLM para una respuesta de conocimiento general ampliada
+        SYSTEM_PROMPT_FALLBACK = (
+            "Eres 'Gemi', un asistente educativo de salud, amable y experto. "
+            "Estás respondiendo a una pregunta sobre una enfermedad rara (Síndrome de Down, Williams o MPS). "
+            "**IMPORTANTE: No se han encontrado documentos locales (RAG).** Debes usar **solo tu conocimiento general** "
+            "para responder la pregunta. Responde de forma clara y concisa (4-8 oraciones). **No digas que no tienes documentos, simplemente responde con seguridad**. "
+            "Añade al final de tu respuesta la nota: '(Respuesta de conocimiento general, sin evidencia local)'. "
+            "No hagas diagnósticos. Si listes, usa viñetas '• '."
         )
 
-    # --- Nuevo SYSTEM_PROMPT: combinar conocimiento general + documentos locales ---
-    SYSTEM_PROMPT = (
-        "Eres 'Gemi', un asistente educativo en salud, claro y empático, especializado en enfermedades raras.\n"
-        "Instrucciones estrictas para todas las respuestas:\n"
-        "1) RESPONDE EN ESPAÑOL en un tono claro y humano (4-8 oraciones preferible para preguntas generales).\n"
-        "2) Usa tu conocimiento general verificado para explicar conceptos relevantes, y USA LOS DOCUMENTOS LOCALES recuperados "
-        "como fuentes de apoyo. No limites la respuesta a repetir textualmente los documentos.\n"
-        "3) Si usas información específica que proviene de los documentos, indícalo con una cita entre corchetes numéricos "
-        "ej.: [1]. Al final incluye una lista corta de citas APA si hay documentos usados.\n"
-        "4) Si hay discrepancia entre lo que sabes y lo que dicen los documentos, dilo explícitamente y ofrece la mejor explicación.\n"
-        "5) No inventes fuentes ni datos (si no estás seguro, indica el nivel de confianza o sugiere buscar/ingresar más docs).\n"
-        "6) Cuando listes manifestaciones, usa viñetas '• '.\n"
-        "7) Termina con una nota breve de seguridad: 'No sustituye evaluación médica'."
-    )
+        messages = [
+            {"role": "system", "content": SYSTEM_PROMPT_FALLBACK},
+            {"role": "user", "content": "Pregunta: " + t}
+        ]
 
-    # Reducimos y ordenamos el contexto: pasar primero un resumen compacto de los docs
-    # (tomamos las primeras N bloques del rag_text para no reventar el prompt)
+        # Usamos el LLM para una respuesta de conocimiento general dinámica y no repetitiva
+        out = _chat(messages, _LLM_MODEL, temperature=0.35, num_predict=350, top_p=0.95)
+        raw = (out.get("message") or {}).get("content", "").strip()
+        reply = _tidy_output(raw)
+        return reply or "No pude generar una respuesta de conocimiento general en este momento.", [], []
+    
+    # --------------------------------------------------------------------------------
+    # FIN DE LA NUEVA LÓGICA DE FALLBACK
+    # --------------------------------------------------------------------------------
+
+
+    # --------------------------------------------------------------------------------
+    # FLUJO CON RAG: Ahora con un SYSTEM_PROMPT más flexible
+    # --------------------------------------------------------------------------------
+    SYSTEM_PROMPT = (
+        "Eres Gemi, un **asistente educativo de salud** experto, amigable y muy entusiasta, "
+        "especializado en enfermedades raras como Síndrome de Down, Williams y MPS.\n"
+        "Tu misión es ofrecer respuestas completas y de alta calidad. **Combina tu conocimiento general** para el contexto y la fluidez, "
+        "y usa el **Contexto Recuperado (RAG)** como evidencia principal para datos específicos. No te limites solo a repetir los documentos.\n"
+        "Responde SIEMPRE en español, con un tono cálido y proactivo. Usa viñetas '• ' cuando listes síntomas o características.\n"
+        "No hagas diagnósticos, no indiques dosis ni tratamientos. **La respuesta debe ser concisa, idealmente 4-8 oraciones**.\n"
+        "Marca con [1], [2], ... los fragmentos del contexto recuperado cuando los uses."
+    )
+    
     ctx_preview = "\n".join(rag_text.split("\n")[:7])  # 7 fragmentos/lineas como preview
 
     messages = [
         {"role": "system", "content": SYSTEM_PROMPT},
         {"role": "system", "content": f"Contexto recuperado (fragmentos relevantes):\n{ctx_preview}"},
-        {"role": "user", "content": (
-            "Pregunta del usuario: " + t + "\n\n"
-            "INSTRUCCIONES AL MODELO: Primero responde usando tu conocimiento general y experiencia (si aplica). "
-            "Después, confirma o amplía con la evidencia local recuperada. "
-            "Marca con [1], [2], ... los fragmentos del contexto cuando los uses. "
-            "Si la evidencia local contradice tu conocimiento general, explica la discrepancia."
-        )}
+        {"role": "user", "content": t},
     ]
 
-    # Ajustes de decodificación para respuestas menos 'roboticas' y más síntesis:
     out = _chat(messages, _LLM_MODEL, temperature=0.35, num_predict=350, top_p=0.95)
     raw = (out.get("message") or {}).get("content", "").strip()
     reply = _tidy_output(raw)
 
-    # Formatea citas APA (máx 4)
     citations_apa = bm25_apa(metas)
     if reply:
-        # añadimos la nota de seguridad en todas las respuestas
+        # Añadimos la nota de seguridad al final de las respuestas con RAG
         if "No sustituye evaluación médica" not in reply:
             reply += " (Contenido educativo; no sustituye evaluación médica)."
 
     return reply or "No pude generar respuesta en este momento.", metas, citations_apa
+
+# ... Reexportaciones (API pública del módulo) permanecen igual...
 
 
 # --- Reexportaciones (API pública del módulo) ---
