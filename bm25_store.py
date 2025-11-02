@@ -138,18 +138,23 @@ def format_apa6_list(metas: List[Dict], limit: int = 4) -> List[str]:
         year = m.get("year") or "s.f."
         tipo = f" ({m.get('type')})" if m.get("type") else ""
         country = f", {m.get('country')}" if m.get("country") else ""
-        tail = []
-        if m.get("doi"):
-            tail.append(f"DOI: {m['doi']}")
-        if m.get("url"):
-            tail.append(m["url"])
-        tail_str = (" " + " · ".join(tail)) if tail else ""
+
+        # Evita strings por defecto o valores falsos
+        doi_val = m.get("doi")
+        url_val = m.get("url")
+        tail_parts = []
+        if doi_val and isinstance(doi_val, str) and doi_val.lower() not in {"string", "none", "", "null"}:
+            tail_parts.append(f"DOI: {doi_val}")
+        if url_val and isinstance(url_val, str) and url_val.lower() not in {"string", "none", "", "null"}:
+            tail_parts.append(url_val)
+        tail_str = (" " + " · ".join(tail_parts)) if tail_parts else ""
 
         out.append(f"{title}. ({year}). {source}{tipo}{country}.{tail_str}".strip())
 
         if len(out) >= limit:
             break
     return out
+
 
 # --- Eliminar documento ---
 def delete_document(doc_id: str) -> int:

@@ -151,8 +151,8 @@ def generate_answer(user_msg: str,
     effective_topic = topic or inferred
     where = _compose_where(topic=effective_topic, lang=lang, min_year=min_year, types=types)
 
-    # Recuperar contexto con BM25 filtrado
-    rag_text, metas = bm25_query(t, k=5, where=where)
+    # Recuperar contexto con BM25 filtrado (pedimos un poco más de contexto para dar más material)
+    rag_text, metas = bm25_query(t, k=7, where=where)
 
     # Si no hay docs del tema → fallback educativo honesto
     if not rag_text:
@@ -166,26 +166,48 @@ def generate_answer(user_msg: str,
             [], []
         )
 
+    # --- Nuevo SYSTEM_PROMPT: combinar conocimiento general + documentos locales ---
     SYSTEM_PROMPT = (
-        "Eres un asistente educativo de salud llamado 'Gemi', especializado en enfermedades raras.\n"
-        "Responde SIEMPRE en español, con tono claro y amable, en 4–8 oraciones.\n"
-        "Cuando listes manifestaciones, usa viñetas con '• ' al inicio de cada línea.\n"
-        "No hagas diagnósticos personalizados ni indiques dosis. Termina con una nota breve de seguridad."
+        "Eres 'Gemi', un asistente educativo en salud, claro y empático, especializado en enfermedades raras.\n"
+        "Instrucciones estrictas para todas las respuestas:\n"
+        "1) RESPONDE EN ESPAÑOL en un tono claro y humano (4-8 oraciones preferible para preguntas generales).\n"
+        "2) Usa tu conocimiento general verificado para explicar conceptos relevantes, y USA LOS DOCUMENTOS LOCALES recuperados "
+        "como fuentes de apoyo. No limites la respuesta a repetir textualmente los documentos.\n"
+        "3) Si usas información específica que proviene de los documentos, indícalo con una cita entre corchetes numéricos "
+        "ej.: [1]. Al final incluye una lista corta de citas APA si hay documentos usados.\n"
+        "4) Si hay discrepancia entre lo que sabes y lo que dicen los documentos, dilo explícitamente y ofrece la mejor explicación.\n"
+        "5) No inventes fuentes ni datos (si no estás seguro, indica el nivel de confianza o sugiere buscar/ingresar más docs).\n"
+        "6) Cuando listes manifestaciones, usa viñetas '• '.\n"
+        "7) Termina con una nota breve de seguridad: 'No sustituye evaluación médica'."
     )
+
+    # Reducimos y ordenamos el contexto: pasar primero un resumen compacto de los docs
+    # (tomamos las primeras N bloques del rag_text para no reventar el prompt)
+    ctx_preview = "\n".join(rag_text.split("\n")[:7])  # 7 fragmentos/lineas como preview
 
     messages = [
         {"role": "system", "content": SYSTEM_PROMPT},
-        {"role": "system", "content": f"Contexto recuperado:\n{rag_text}"},
-        {"role": "user", "content": t},
+        {"role": "system", "content": f"Contexto recuperado (fragmentos relevantes):\n{ctx_preview}"},
+        {"role": "user", "content": (
+            "Pregunta del usuario: " + t + "\n\n"
+            "INSTRUCCIONES AL MODELO: Primero responde usando tu conocimiento general y experiencia (si aplica). "
+            "Después, confirma o amplía con la evidencia local recuperada. "
+            "Marca con [1], [2], ... los fragmentos del contexto cuando los uses. "
+            "Si la evidencia local contradice tu conocimiento general, explica la discrepancia."
+        )}
     ]
 
-    out = _chat(messages, _LLM_MODEL, temperature=0.10, num_predict=220, top_p=0.9)
+    # Ajustes de decodificación para respuestas menos 'roboticas' y más síntesis:
+    out = _chat(messages, _LLM_MODEL, temperature=0.35, num_predict=350, top_p=0.95)
     raw = (out.get("message") or {}).get("content", "").strip()
     reply = _tidy_output(raw)
 
+    # Formatea citas APA (máx 4)
     citations_apa = bm25_apa(metas)
     if reply:
-        reply += " (Contenido educativo; no sustituye evaluación médica)."
+        # añadimos la nota de seguridad en todas las respuestas
+        if "No sustituye evaluación médica" not in reply:
+            reply += " (Contenido educativo; no sustituye evaluación médica)."
 
     return reply or "No pude generar respuesta en este momento.", metas, citations_apa
 
