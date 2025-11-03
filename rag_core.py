@@ -9,7 +9,8 @@ from supabase_client import (
     get_prompt, get_config,
     upsert_document_chunks, 
     delete_document as sb_delete, list_documents as sb_list, get_document_stats as sb_stats,
-    load_all_chunks_for_indexing
+    load_all_chunks_for_indexing,
+    load_diseases, get_allowed_topics, refresh_diseases_cache  # ← NUEVO
 )
 
 # --- Configuración base ---
@@ -193,18 +194,44 @@ def _tidy_output(text: str, max_sentences: int = 15) -> str:
     """Limpia y formatea la salida del LLM."""
     if not text:
         return text
-    text = re.sub(r"(?m)^\s*\*\s+", "• ", text)
-    text = re.sub(r"([a-záéíóúñ])\s+([A-ZÁÉÍÓÚÑ])", r"\1. \2", text)
-    text = re.sub(r"\s{2,}", " ", text).strip()
-    sents = re.split(r"(?<=[\.\?\!])\s+", text)
-    text = " ".join(sents[:max_sentences]).strip()
+    
+    # 1. Limpiar asteriscos de markdown (**, ***, etc.)
+    text = re.sub(r"\*{2,}", "", text)  # Elimina ** y ***
+    text = re.sub(r"\*([^*]+)\*", r"\1", text)  # Elimina * simples *texto*
+    
+    # 2. Convertir bullets de markdown a bullets Unicode
+    text = re.sub(r"(?m)^\s*[\*\-]\s+", "• ", text)
+    
+    # 3. CORREGIR "de. Down" → "de Down" (PROBLEMA PRINCIPAL)
+    text = re.sub(r"\.\s+([A-ZÁÉÍÓÚÑ])", r" \1", text)
+    
+    # 4. Corregir espacios antes de puntuación
+    text = re.sub(r"\s+([.,;:!?])", r"\1", text)
+    
+    # 5. Limpiar puntos al inicio de línea o después de viñetas
+    text = re.sub(r"(^|\n)\s*\.\s*", r"\1", text, flags=re.MULTILINE)
+    text = re.sub(r"(•\s*)\.\s*", r"\1", text)
+    
+    # 6. Normalizar espacios múltiples
+    text = re.sub(r"\s{2,}", " ", text)
+    
+    # 7. Limpiar espacios al inicio/final
+    text = text.strip()
+    
+    # 8. Limitar número de oraciones (pero no cortar en medio de listas)
+    if "•" not in text and max_sentences < 20:
+        sents = re.split(r"(?<=[\.\?\!])\s+", text)
+        if len(sents) > max_sentences:
+            text = " ".join(sents[:max_sentences]).strip()
+    
+    # 9. Asegurar punto final
     if text and text[-1] not in ".!?":
         text += "."
+    
     return text
 
-
 # ============================================
-# 💬 GENERACIÓN DE RESPUESTA CON LÍMITES ESTRICTOS
+# GENERACIÓN DE RESPUESTA CON LÍMITES ESTRICTOS
 # ============================================
 def generate_answer(user_msg: str,
                     topic: str | None = None,

@@ -29,13 +29,78 @@ def get_supabase():
 
 
 # ============================================
+# 🏥 GESTIÓN DE ENFERMEDADES
+# ============================================
+_diseases_cache = None  # Cache de enfermedades
+
+def load_diseases(force_refresh: bool = False) -> Dict[str, Dict]:
+    """
+    Carga las enfermedades activas desde Supabase.
+    Retorna un dict con estructura: {id: {name, aliases, keywords}}
+    """
+    global _diseases_cache
+    
+    # Usar cache si existe y no se fuerza refresh
+    if _diseases_cache is not None and not force_refresh:
+        return _diseases_cache
+    
+    try:
+        response = get_supabase().table("diseases").select("*").eq("is_active", True).execute()
+        
+        if not response.data:
+            log.warning("⚠️ No hay enfermedades activas en la BD. Usando valores por defecto.")
+            # Fallback básico
+            _diseases_cache = {
+                "down": {"name": "Síndrome de Down", "aliases": ["down"], "keywords": []},
+                "williams": {"name": "Síndrome de Williams", "aliases": ["williams"], "keywords": []},
+                "mps": {"name": "Mucopolisacaridosis", "aliases": ["mps"], "keywords": []}
+            }
+            return _diseases_cache
+        
+        # Construir diccionario desde la BD
+        diseases = {}
+        for row in response.data:
+            diseases[row["id"]] = {
+                "name": row["name"],
+                "aliases": row.get("aliases", []),
+                "keywords": row.get("keywords", []),
+                "description": row.get("description", "")
+            }
+        
+        _diseases_cache = diseases
+        log.info(f"🏥 {len(diseases)} enfermedades cargadas desde BD: {list(diseases.keys())}")
+        return diseases
+        
+    except Exception as e:
+        log.error(f"❌ Error cargando enfermedades: {e}")
+        # Fallback en caso de error
+        return {
+            "down": {"name": "Síndrome de Down", "aliases": ["down"], "keywords": []},
+            "williams": {"name": "Síndrome de Williams", "aliases": ["williams"], "keywords": []},
+            "mps": {"name": "Mucopolisacaridosis", "aliases": ["mps"], "keywords": []}
+        }
+
+
+def get_allowed_topics() -> set:
+    """Retorna el set de IDs de enfermedades permitidas."""
+    diseases = load_diseases()
+    return set(diseases.keys())
+
+
+def refresh_diseases_cache():
+    """Fuerza la recarga de enfermedades desde la BD."""
+    global _diseases_cache
+    _diseases_cache = None
+    return load_diseases(force_refresh=True)
+
+
+# ============================================
 # PROMPTS
 # ============================================
 _prompt_cache = {}  # Cache manual
 
 def get_prompt(name: str, default: str = "") -> str:
     """Obtiene un prompt de la BD."""
-    # Revisar cache primero
     if name in _prompt_cache:
         return _prompt_cache[name]
     
@@ -43,7 +108,7 @@ def get_prompt(name: str, default: str = "") -> str:
         response = get_supabase().table("prompts").select("content").eq("name", name).eq("is_active", True).single().execute()
         if response.data:
             content = response.data["content"]
-            _prompt_cache[name] = content  # Guardar en cache
+            _prompt_cache[name] = content
             log.info(f"📝 Prompt '{name}' cargado desde BD")
             return content
         log.warning(f"⚠️  Prompt '{name}' no encontrado, usando default")
@@ -59,7 +124,6 @@ def update_prompt(name: str, content: str) -> bool:
         get_supabase().table("prompts").update({
             "content": content,
         }).eq("name", name).execute()
-        # Limpiar cache
         if name in _prompt_cache:
             del _prompt_cache[name]
         log.info(f"✅ Prompt '{name}' actualizado")
@@ -72,11 +136,10 @@ def update_prompt(name: str, content: str) -> bool:
 # ============================================
 # CONFIGURACIÓN
 # ============================================
-_config_cache = {}  # Cache manual
+_config_cache = {}
 
 def get_config(key: str, default: Any = None) -> Any:
     """Obtiene configuración de la BD."""
-    # Revisar cache primero
     if key in _config_cache:
         return _config_cache[key]
     
@@ -84,7 +147,7 @@ def get_config(key: str, default: Any = None) -> Any:
         response = get_supabase().table("config").select("value").eq("key", key).single().execute()
         if response.data:
             value = response.data["value"]
-            _config_cache[key] = value  # Guardar en cache
+            _config_cache[key] = value
             log.info(f"⚙️  Config '{key}' cargada desde BD")
             return value
         log.warning(f"⚠️  Config '{key}' no encontrada, usando default")
@@ -101,7 +164,6 @@ def update_config(key: str, value: Any) -> bool:
             "key": key,
             "value": value
         }).execute()
-        # Limpiar cache
         if key in _config_cache:
             del _config_cache[key]
         log.info(f"✅ Config '{key}' actualizada")
@@ -117,83 +179,38 @@ def update_config(key: str, value: Any) -> bool:
 def upsert_document_chunks(doc_id: str, chunks: List[Dict]) -> int:
     """Inserta/actualiza chunks de documento en Supabase."""
     try:
-        # Elimina chunks existentes del mismo doc_id
         get_supabase().table("documents").delete().eq("doc_id", doc_id).execute()
         log.info(f"🗑️  Chunks antiguos de '{doc_id}' eliminados")
         
         if not chunks:
             return 0
         
-        # Prepara filas para inserción
         rows = []
         for chunk in chunks:
-            # --- INICIO DE LA CORRECCIÓN ---
-            # Ya no buscamos en 'meta', leemos directo del chunk
             row = {
                 "doc_id": doc_id,
                 "chunk_index": chunk["chunk_index"],
                 "content": chunk["content"],
                 "tokens": chunk["tokens"],
-                "topic": chunk.get("topic"), # Leer directo
-                "lang": chunk.get("lang", "es"), # Leer directo
-                "year": chunk.get("year"), # Leer directo
-                "type": chunk.get("type"), # Leer directo
-                "country": chunk.get("country"), # Leer directo
-                "title": chunk.get("title"), # Leer directo
-                "doi": chunk.get("doi"), # Leer directo
-                "url": chunk.get("url"), # Leer directo
-                "source_name": chunk.get("source_name"), # Leer directo
+                "topic": chunk.get("topic"),
+                "lang": chunk.get("lang", "es"),
+                "year": chunk.get("year"),
+                "type": chunk.get("type"),
+                "country": chunk.get("country"),
+                "title": chunk.get("title"),
+                "doi": chunk.get("doi"),
+                "url": chunk.get("url"),
+                "source_name": chunk.get("source_name"),
             }
-            # --- FIN DE LA CORRECCIÓN ---
             rows.append(row)
         
-        # Inserta en batch
         get_supabase().table("documents").insert(rows).execute()
         log.info(f"✅ {len(rows)} chunks de '{doc_id}' insertados en Supabase")
         
         return len(rows)
     except Exception as e:
         log.error(f"❌ Error insertando documento '{doc_id}': {e}")
-        return 
-
-
-def query_documents(query_tokens: List[str], 
-                   k: int = 5, 
-                   where: Dict | None = None) -> Tuple[List[Dict], List[Dict]]:
-    """Busca documentos relevantes."""
-    try:
-        # Construir query base
-        query = get_supabase().table("documents").select("*")
-        
-        # Aplicar filtros
-        if where:
-            if "topic" in where:
-                query = query.eq("topic", where["topic"])
-                log.info(f"🔍 Filtrando por topic: {where['topic']}")
-            if "lang" in where:
-                query = query.eq("lang", where["lang"])
-            if "min_year" in where:
-                query = query.gte("year", where["min_year"])
-            if "type" in where:
-                query = query.eq("type", where["type"])
-        
-        response = query.limit(k * 2).execute()  # Traemos más para luego rankear
-        
-        if not response.data:
-            log.warning(f"⚠️  No se encontraron documentos para los filtros: {where}")
-            return [], []
-        
-        log.info(f"📚 {len(response.data)} chunks recuperados de Supabase")
-        
-        # Simplificado: retornamos los primeros k
-        # TODO: Implementar scoring BM25 real aquí
-        chunks = response.data[:k]
-        
-        return chunks, chunks
-        
-    except Exception as e:
-        log.error(f"❌ Error consultando documentos: {e}")
-        return [], []
+        return 0
 
 
 def delete_document(doc_id: str) -> int:
@@ -213,7 +230,6 @@ def list_documents() -> List[Dict]:
     try:
         response = get_supabase().table("documents").select("doc_id, title, topic, source_name, created_at").execute()
         
-        # Agrupar por doc_id
         docs_map = {}
         for row in response.data:
             did = row["doc_id"]
@@ -256,10 +272,10 @@ def get_document_stats(doc_id: str) -> Dict:
         log.error(f"❌ Error obteniendo stats de '{doc_id}': {e}")
         return {"doc_id": doc_id, "error": str(e)}
     
+
 def load_all_chunks_for_indexing() -> List[Dict]:
     """Obtiene todos los chunks y sus metadatos de Supabase."""
     try:
-        # Pide solo los campos necesarios para la ingesta de BM25
         response = get_supabase().table("documents").select(
             "doc_id, chunk_index, content, tokens, topic, lang, year, title"
         ).execute()
