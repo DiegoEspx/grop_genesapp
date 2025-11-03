@@ -3,6 +3,7 @@ import re, logging
 from typing import List, Dict, Tuple, Any
 import threading
 from rank_bm25 import BM25Okapi
+import re
 
 from llm_client import build_llm_from_env
 from supabase_client import (
@@ -190,35 +191,42 @@ def _is_specific_rare_disease_query(text: str) -> bool:
     return False
 
 
-def _tidy_output(text: str, max_sentences: int = 15) -> str:
+def _tidy_output(text: str) -> str:
     """
-    Limpia y formatea la salida del LLM CONVIRTIÉNDOLA a texto plano estructurado.
-    Esto es para apps que NO renderizan markdown.
+    Limpia y formatea la salida del LLM, preservando el formato **Markdown** para su correcta renderización en la aplicación Flutter.
     """
     if not text:
         return text
+        
+    # 1. 💡 REINTRODUCIR LA LÍNEA MODIFICADA: Convertir las mayúsculas con doble asterisco
+    # y DOBLE DOS PUNTOS a solo **negrita** (eliminando los :: que causan problemas)
+    # Ejemplo: **TITULO::** -> **TITULO**
+    text = re.sub(r"\*\*([^*]+?)\:\s*\*\*", r"\*\* \1\*\*", text)
+    # Ejemplo: **TITULO::** -> **TITULO**
+    text = re.sub(r"\*\*([^*]+)\:\s*([^\*])", r"**\1** \2", text)
+    # Ejemplo: **TITULO**:: -> **TITULO**
+    text = re.sub(r"\*\*([^*]+)\*\*::", r"**\1**", text)
     
-    # 1. Convertir **negritas** a MAYÚSCULAS o agregar énfasis visual
-    # Opción A: MAYÚSCULAS (más visible)
-    text = re.sub(r"\*\*([^*]+)\*\*", lambda m: m.group(1).upper() + ":", text)
-    
-    # Opción B: Si prefieres mantener formato original con símbolos
-    # text = re.sub(r"\*\*([^*]+)\*\*", r"▸ \1:", text)
-    
+    # Si quieres que el texto siempre sea en mayúsculas y negrita, usa:
+    # text = re.sub(r"\*\*([^*]+)\*\*", lambda m: f"**{m.group(1).strip().upper()}**", text)
+
     # 2. Limpiar asteriscos simples (si quedaron)
     text = re.sub(r"\*([^*]+)\*", r"\1", text)
     
-    # 3. Normalizar viñetas
-    text = re.sub(r"^\s*[\*\-]\s+", "• ", text, flags=re.MULTILINE)
+    # 3. Normalizar viñetas (esto está bien, crea Markdown de lista: "- ")
+    # Cambia el bullet point a * para que sea Markdown
+    text = re.sub(r"^\s*[\*\-]\s+", "* ", text, flags=re.MULTILINE)
     
     # 4. Asegurar saltos de línea ANTES de títulos/secciones
-    text = re.sub(r"([a-z])\s*\n([A-ZÁÉÍÓÚÑ]{2,}:)", r"\1\n\n\2", text)
+    text = re.sub(r"([a-z])\s*\n([A-ZÁÉÍÓÚÑ]{2,}[^a-z])", r"\1\n\n\2", text)
     
     # 5. Asegurar salto de línea ANTES de listas
-    text = re.sub(r"([^\n])\n(•)", r"\1\n\n\2", text)
+    # Cambiamos • por *
+    text = re.sub(r"([^\n])\n(\*)", r"\1\n\n\2", text)
     
     # 6. Asegurar salto después de dos puntos seguidos de lista
-    text = re.sub(r":\s*(•)", r":\n\n\1", text)
+    # Cambiamos • por *
+    text = re.sub(r":\s*(\*)", r":\n\n\1", text)
     
     # 7. CORREGIR "de. Down" → "de Down"
     text = re.sub(r"([a-záéíóúüñ])\.\s+([A-ZÁÉÍÓÚÑ])", r"\1 \2", text)
