@@ -1,21 +1,20 @@
 from __future__ import annotations
 import re, logging
 from typing import List, Dict, Tuple, Any
-import threading # <-- NUEVA DEPENDENCIA
-from rank_bm25 import BM25Okapi # <-- NUEVA LIBRERÍA
+import threading
+from rank_bm25 import BM25Okapi
 
 from llm_client import build_llm_from_env
 from supabase_client import (
     get_prompt, get_config,
-    # REEMPAZADO: Eliminamos 'query_documents' porque ya no la usamos
     upsert_document_chunks, 
     delete_document as sb_delete, list_documents as sb_list, get_document_stats as sb_stats,
-    load_all_chunks_for_indexing # <-- NUEVA FUNCIÓN PARA BM25
+    load_all_chunks_for_indexing
 )
 
 # --- Configuración base ---
 log = logging.getLogger("uvicorn.error")
-_LLM_CLIENT, _LLM_BACKEND, _LLM_MODEL = build_llm_from_env() 
+_LLM_CLIENT, _LLM_BACKEND, _LLM_MODEL = build_llm_from_env()
 
 
 # ============================================
@@ -34,7 +33,6 @@ def _chat(messages, model, **opts):
 _WORD = re.compile(r"[A-Za-zÁÉÍÓÚÜÑáéíóúüñ0-9]+", re.UNICODE)
 
 def _tokenize(text: str) -> List[str]:
-    # ¡Importante! Debe ser la misma tokenización que se usó al guardar los tokens en Supabase.
     return [m.group(0).lower() for m in _WORD.finditer(text)]
 
 
@@ -54,8 +52,6 @@ def build_bm25_index():
 
     with _LOCK:
         _BM25_METAS = chunks 
-        
-        # Usamos los tokens que YA están guardados en el campo 'tokens' de Supabase
         tokenized_corpus = [
             chunk["tokens"] for chunk in chunks
             if chunk.get("tokens")
@@ -80,78 +76,121 @@ def query_bm25_index(query_text: str, k: int, where: Dict) -> Tuple[List[Dict], 
 
     query_tokens = _tokenize(query_text)
     scores = _BM25_INDEX.get_scores(query_tokens)
-    
-    # Rankear por score (del más alto al más bajo)
     ranked_indices = sorted(range(len(scores)), key=lambda i: scores[i], reverse=True)
     
     picked_metas = []
     
     for idx in ranked_indices:
-        meta = _BM25_METAS[idx] # Obtener metadatos del chunk
+        meta = _BM25_METAS[idx]
         
-        # Aplicar filtros de metadatos (el 'where' que viene de generate_answer)
+        # Aplicar filtros de metadatos
         if where.get("topic") and meta.get("topic") != where["topic"]:
             continue
         if where.get("lang") and meta.get("lang") != where["lang"]:
             continue
         if where.get("min_year") and meta.get("year", 0) < where["min_year"]:
             continue
-        # Puedes añadir otros filtros como 'type' aquí...
         
         picked_metas.append(meta)
         
         if len(picked_metas) >= k:
             break
             
-    # Devuelve (chunks, metas), que en este caso son lo mismo.
     return picked_metas, picked_metas
 
 
 # ============================================
-# 🧬 RECONOCIMIENTO DE TEMAS Y UTILS
+# 🧬 RECONOCIMIENTO DE TEMAS Y VALIDACIÓN
 # ============================================
+
+# ✅ TOPICS PERMITIDOS (lo que el sistema REALMENTE soporta)
+ALLOWED_TOPICS = {"down", "williams", "mps"}
+
+# Aliases más específicos y estrictos
 _DISEASE_ALIASES = {
-# ... (dejas tus aliases aquí) ...
-    r"\bdown\b": "down", r"\bwilliams\b": "williams", r"\bmps\b": "mps",
-    r"\bmucopolisacaridos(?:is|es)?\b": "mps", r"\bmucopolisacaridosis\b": "mps",
-    r"\bhurler\b": "mps", r"\bhunter\b": "mps", r"\bsanfilippo\b": "mps", r"\bmorquio\b": "mps",
+    r"\bdown\b": "down",
+    r"\bs(?:í|i)ndrome\s+de\s+down\b": "down",
+    r"\btrisom(?:í|i)a\s+21\b": "down",
+    
+    r"\bwilliams\b": "williams",
+    r"\bs(?:í|i)ndrome\s+de\s+williams\b": "williams",
+    r"\bwilliams[-\s]beuren\b": "williams",
+    
+    r"\bmps\b": "mps",
+    r"\bmucopolisacaridos(?:is|es)?\b": "mps",
+    r"\bmucopolisacaridosis\b": "mps",
+    r"\bhurler\b": "mps",
+    r"\bhunter\b": "mps",
+    r"\bsanfilippo\b": "mps",
+    r"\bmorquio\b": "mps",
 }
-# ... (el resto de tus constantes y funciones auxiliares) ...
-_HEALTH_KEYWORDS = {
-    "salud", "síntoma", "sintoma", "diagnóstico", "diagnostico",
-    "enfermedad", "síndrome", "sindrome", "genética", "genetica",
-    "tratamiento", "prevención", "prevencion", "terapia", "cuidado",
-    "manifestación", "manifestacion", "característica", "caracteristica"
+
+# ✅ PALABRAS ESPECÍFICAS de las 3 condiciones
+_CONDITION_SPECIFIC_KEYWORDS = {
+    # Down
+    "trisomía", "trisomia", "cromosoma 21", "cariotipo",
+    # Williams
+    "elastina", "estenosis aórtica", "hipercalcemia",
+    # MPS
+    "glicosaminoglicanos", "lisosoma", "enzimática", "enzimatica",
 }
 
 _GREET_WORDS = {
     "hola", "buenas", "buenos días", "buenas tardes", "buenas noches",
-    "hey", "hi", "hello", "qué tal", "que tal"
+    "hey", "hi", "hello", "qué tal", "que tal", "saludos"
 }
 
 _SMALLTALK_WORDS = {
     "cómo estás", "como estas", "que haces", "qué haces",
-    "cómo va", "como va", "gracias", "ok", "vale"
+    "cómo va", "como va", "gracias", "ok", "vale", "genial"
 }
 
 
-def _is_health_related(text: str) -> bool:
-    t = (text or "").lower()
-    if any(kw in t for kw in _HEALTH_KEYWORDS):
-        return True
-    return _extract_topic(t) is not None
-
 def _extract_topic(text: str) -> str | None:
+    """Extrae el topic de enfermedades raras del texto."""
+    t = text.lower()
     for pat, topic in _DISEASE_ALIASES.items():
-        if re.search(pat, text.lower()):
+        if re.search(pat, t):
             return topic
     return None
 
+
 def _is_smalltalk(t: str) -> bool:
+    """Detecta si es un saludo o conversación casual."""
     t = t.lower().strip()
-    return any(w in t for w in _GREET_WORDS | _SMALLTALK_WORDS)
+    # Si el mensaje es muy corto y contiene palabras de saludo
+    words = set(t.split())
+    if len(words) <= 5 and any(w in _GREET_WORDS | _SMALLTALK_WORDS for w in words):
+        return True
+    return False
+
+
+def _is_specific_rare_disease_query(text: str) -> bool:
+    """
+    Verifica si la consulta es ESPECÍFICAMENTE sobre las enfermedades raras soportadas.
+    Retorna True SOLO si hay evidencia clara del dominio.
+    """
+    t = text.lower()
+    
+    # 1. ¿Menciona explícitamente alguna condición?
+    if _extract_topic(t):
+        return True
+    
+    # 2. ¿Contiene términos médicos específicos de estas condiciones?
+    if any(kw in t for kw in _CONDITION_SPECIFIC_KEYWORDS):
+        return True
+    
+    # 3. ¿Combina "síndrome/enfermedad" + término médico relevante?
+    if re.search(r"\b(s[ií]ndrome|enfermedad)\b", t):
+        medical_terms = ["gen[ée]tic", "cromosoma", "cong[ée]nit", "raro"]
+        if any(re.search(term, t) for term in medical_terms):
+            return True
+    
+    return False
+
 
 def _tidy_output(text: str, max_sentences: int = 15) -> str:
+    """Limpia y formatea la salida del LLM."""
     if not text:
         return text
     text = re.sub(r"(?m)^\s*\*\s+", "• ", text)
@@ -165,13 +204,16 @@ def _tidy_output(text: str, max_sentences: int = 15) -> str:
 
 
 # ============================================
-# 💬 GENERACIÓN DE RESPUESTA
+# 💬 GENERACIÓN DE RESPUESTA CON LÍMITES ESTRICTOS
 # ============================================
 def generate_answer(user_msg: str,
                     topic: str | None = None,
                     min_year: int | None = None,
                     types: list[str] | None = None,
                     lang: str | None = None):
+    """
+    Genera respuesta con validación estricta del dominio.
+    """
     t = (user_msg or "").strip()
 
     # Obtener configuración desde BD
@@ -179,21 +221,40 @@ def generate_answer(user_msg: str,
         "temperature": 0.35, "max_tokens": 450, "top_p": 0.92, "max_sentences": 15
     })
 
-    # Small-talk / saludo
+    # 1️⃣ SMALL-TALK / SALUDO
     if _is_smalltalk(t):
-        greeting = get_prompt("greeting", "¡Hola! Soy Gemi, tu asistente de enfermedades raras.")
+        greeting = get_prompt("greeting", 
+            "¡Hola! Soy Gemi, tu asistente especializado en enfermedades raras: síndrome de Down, Williams y mucopolisacaridosis (MPS). ¿En qué puedo ayudarte?")
         return (greeting, [], [])
 
-    inferred = _extract_topic(t)
+    # 2️⃣ EXTRAER Y VALIDAR TOPIC
+    inferred_topic = _extract_topic(t)
+    effective_topic = topic or inferred_topic
+    
+    # ✅ VALIDACIÓN CRÍTICA: ¿El topic está permitido?
+    if effective_topic and effective_topic not in ALLOWED_TOPICS:
+        log.warning(f"⚠️ Topic '{effective_topic}' no está en ALLOWED_TOPICS")
+        effective_topic = None
 
-    # Si no hay señales médicas
-    if not _is_health_related(t) and not (topic or inferred):
-        no_topic_msg = get_prompt("no_topic", "¿Sobre qué tema te gustaría información?")
+    # 3️⃣ VERIFICAR SI LA CONSULTA ES DEL DOMINIO
+    is_rare_disease_query = _is_specific_rare_disease_query(t)
+    
+    # ❌ RECHAZAR si no hay evidencia del dominio
+    if not is_rare_disease_query and not effective_topic:
+        out_of_scope = get_prompt("out_of_scope", 
+            "Lo siento, solo puedo ayudarte con información sobre enfermedades raras específicas: síndrome de Down, síndrome de Williams y mucopolisacaridosis (MPS). "
+            "¿Tienes alguna pregunta sobre alguna de estas condiciones?")
+        log.info(f"🚫 Consulta fuera de alcance: '{t[:50]}...'")
+        return (out_of_scope, [], [])
+
+    # 4️⃣ SI NO HAY TOPIC pero SÍ es consulta médica → pedir clarificación
+    if not effective_topic:
+        no_topic_msg = get_prompt("no_topic", 
+            "Puedo ayudarte con información sobre síndrome de Down, Williams o mucopolisacaridosis (MPS). "
+            "¿Podrías indicarme sobre cuál de estas condiciones te gustaría información?")
         return (no_topic_msg, [], [])
 
-    effective_topic = topic or inferred
-    
-    # Construir filtros
+    # 5️⃣ CONSTRUIR FILTROS PARA RAG
     where = {}
     if effective_topic:
         where["topic"] = effective_topic
@@ -204,40 +265,45 @@ def generate_answer(user_msg: str,
     if types:
         where["type"] = types[0] if len(types) == 1 else types
 
-    # Consultar documentos usando el índice BM25 en memoria
+    # 6️⃣ CONSULTAR BM25
     rag_params = get_config("rag_params", {"k_results": 5})
-    
-    # --- CAMBIO A BM25 ---
     chunks, metas = query_bm25_index(
         query_text=t,
         k=rag_params.get("k_results", 5),
         where=where if where else {}
     )
-    # --- FIN CAMBIO A BM25 ---
 
-    # Obtener prompt del sistema desde BD
-    system_prompt = get_prompt("system_main", "Eres Gemi, asistente médico educativo.")
+    # 7️⃣ CONSTRUIR PROMPT DEL SISTEMA CON RESTRICCIONES
+    system_prompt = get_prompt("system_main", 
+        "Eres Gemi, un asistente médico educativo especializado ÚNICAMENTE en enfermedades raras.")
     
-    # Agregar contexto del tema
+    # ✅ AÑADIR RESTRICCIÓN EXPLÍCITA
+    system_prompt += f"\n\n⚠️ RESTRICCIÓN CRÍTICA: Solo responde preguntas sobre síndrome de Down, Williams y mucopolisacaridosis (MPS). Si te preguntan sobre otros temas, indica educadamente que solo puedes ayudar con estas tres condiciones."
+    
     if effective_topic:
-        system_prompt += f"\n\nTEMA ACTUAL: {effective_topic}"
+        topic_names = {
+            "down": "Síndrome de Down",
+            "williams": "Síndrome de Williams",
+            "mps": "Mucopolisacaridosis (MPS)"
+        }
+        system_prompt += f"\n\nTEMA ACTUAL: {topic_names.get(effective_topic, effective_topic)}"
 
-    # Preparar contexto de documentos
+    # 8️⃣ PREPARAR CONTEXTO DE DOCUMENTOS
     if chunks:
         ctx_lines = []
         for i, chunk in enumerate(chunks, 1):
             ctx_lines.append(f"[{i}] {chunk['content']}")
         rag_text = "\n".join(ctx_lines)
-        context_section = f"\n\nDOCUMENTOS DE REFERENCIA (úsalos para validar y complementar):\n{rag_text}"
+        context_section = f"\n\nDOCUMENTOS DE REFERENCIA:\n{rag_text}"
     else:
-        context_section = "\n\nNOTA: No hay documentos específicos cargados para este tema, pero puedes usar tu conocimiento médico general."
+        context_section = "\n\nNOTA: No hay documentos específicos cargados para este tema, pero usa tu conocimiento médico general SOLO sobre las tres condiciones permitidas."
 
     messages = [
         {"role": "system", "content": system_prompt + context_section},
         {"role": "user", "content": t},
     ]
 
-    # Llamar al LLM con parámetros configurables
+    # 9️⃣ LLAMAR AL LLM
     out = _chat(
         messages, 
         _LLM_MODEL,
@@ -249,10 +315,10 @@ def generate_answer(user_msg: str,
     raw = (out.get("message") or {}).get("content", "").strip()
     reply = _tidy_output(raw, max_sentences=llm_params.get("max_sentences", 15))
 
-    # Formatear citas APA
+    # 🔟 FORMATEAR CITAS APA
     citations_apa = _format_apa(metas) if metas else []
     
-    # Nota de seguridad desde BD
+    # 1️⃣1️⃣ NOTA DE SEGURIDAD
     safety_note = get_prompt("safety_note", "")
     if reply and safety_note and not any(x in reply.lower() for x in ["consulta", "médico"]):
         reply += f"\n\n{safety_note}"
@@ -295,6 +361,11 @@ def upsert_document(doc_id: str, source: str, full_text: str,
                     overlap: int = 180) -> int:
     """Inserta documento chunkeado en Supabase."""
     
+    # ✅ VALIDAR TOPIC ANTES DE INSERTAR
+    if topic and topic not in ALLOWED_TOPICS:
+        log.error(f"❌ Topic '{topic}' no permitido. Solo se aceptan: {ALLOWED_TOPICS}")
+        return 0
+    
     log.info(f"🔄 Iniciando upsert_document para '{doc_id}'")
     
     rag_params = get_config("rag_params", {})
@@ -303,10 +374,10 @@ def upsert_document(doc_id: str, source: str, full_text: str,
     
     chunks_text = _chunk_text(full_text, chunk_size, overlap)
     
-    log.info(f"✂️  Generados {len(chunks_text)} chunks de texto")
+    log.info(f"✂️  Generados {len(chunks_text)} chunks de texto")
     
     if len(chunks_text) == 0:
-        log.warning(f"⚠️  No se generaron chunks para '{doc_id}'")
+        log.warning(f"⚠️  No se generaron chunks para '{doc_id}'")
         return 0
     
     chunks = []
@@ -326,11 +397,9 @@ def upsert_document(doc_id: str, source: str, full_text: str,
     result = upsert_document_chunks(doc_id, chunks)
     log.info(f"✅ Insertados {result} chunks en Supabase")
     
-    # --- NUEVO: Reconstruir el índice BM25 en memoria ---
     if result > 0:
         log.info("🔄 Actualizando índice BM25 en memoria...")
-        build_bm25_index() # Llama a la nueva función
-    # --- FIN NUEVO ---
+        build_bm25_index()
     
     return result
 
@@ -343,7 +412,6 @@ def _chunk_text(text: str, chunk_size: int, overlap: int) -> List[str]:
     while start < N:
         end = min(start + chunk_size, N)
         cut = end
-        # Intenta cortar en un punto de puntuación, retrocediendo no más de 200 caracteres
         for sep in [". ", " ", ""]:
             idx = text.rfind(sep, start + 200, end)
             if idx != -1:
@@ -369,5 +437,4 @@ doc_stats = sb_stats
 # ============================================
 # ⚙️ INICIALIZACIÓN
 # ============================================
-# Esta línea se ejecuta al iniciar el servidor para cargar el índice por primera vez
 build_bm25_index()
