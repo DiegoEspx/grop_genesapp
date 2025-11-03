@@ -191,41 +191,55 @@ def _is_specific_rare_disease_query(text: str) -> bool:
 
 
 def _tidy_output(text: str, max_sentences: int = 15) -> str:
-    """Limpia y formatea la salida del LLM."""
+    """
+    Limpia y formatea la salida del LLM CONVIRTIÉNDOLA a texto plano estructurado.
+    Esto es para apps que NO renderizan markdown.
+    """
     if not text:
         return text
     
-    # 1. Limpiar asteriscos de markdown (**, ***, etc.)
-    text = re.sub(r"\*{2,}", "", text)  # Elimina ** y ***
-    text = re.sub(r"\*([^*]+)\*", r"\1", text)  # Elimina * simples *texto*
+    # 1. Convertir **negritas** a MAYÚSCULAS o agregar énfasis visual
+    # Opción A: MAYÚSCULAS (más visible)
+    text = re.sub(r"\*\*([^*]+)\*\*", lambda m: m.group(1).upper() + ":", text)
     
-    # 2. Convertir bullets de markdown a bullets Unicode
-    text = re.sub(r"(?m)^\s*[\*\-]\s+", "• ", text)
+    # Opción B: Si prefieres mantener formato original con símbolos
+    # text = re.sub(r"\*\*([^*]+)\*\*", r"▸ \1:", text)
     
-    # 3. CORREGIR "de. Down" → "de Down" (PROBLEMA PRINCIPAL)
-    text = re.sub(r"\.\s+([A-ZÁÉÍÓÚÑ])", r" \1", text)
+    # 2. Limpiar asteriscos simples (si quedaron)
+    text = re.sub(r"\*([^*]+)\*", r"\1", text)
     
-    # 4. Corregir espacios antes de puntuación
+    # 3. Normalizar viñetas
+    text = re.sub(r"^\s*[\*\-]\s+", "• ", text, flags=re.MULTILINE)
+    
+    # 4. Asegurar saltos de línea ANTES de títulos/secciones
+    text = re.sub(r"([a-z])\s*\n([A-ZÁÉÍÓÚÑ]{2,}:)", r"\1\n\n\2", text)
+    
+    # 5. Asegurar salto de línea ANTES de listas
+    text = re.sub(r"([^\n])\n(•)", r"\1\n\n\2", text)
+    
+    # 6. Asegurar salto después de dos puntos seguidos de lista
+    text = re.sub(r":\s*(•)", r":\n\n\1", text)
+    
+    # 7. CORREGIR "de. Down" → "de Down"
+    text = re.sub(r"([a-záéíóúüñ])\.\s+([A-ZÁÉÍÓÚÑ])", r"\1 \2", text)
+    
+    # 8. Corregir espacios antes de puntuación
     text = re.sub(r"\s+([.,;:!?])", r"\1", text)
     
-    # 5. Limpiar puntos al inicio de línea o después de viñetas
-    text = re.sub(r"(^|\n)\s*\.\s*", r"\1", text, flags=re.MULTILINE)
-    text = re.sub(r"(•\s*)\.\s*", r"\1", text)
+    # 9. Limpiar puntos al inicio de línea
+    text = re.sub(r"^\s*\.\s*", "", text, flags=re.MULTILINE)
     
-    # 6. Normalizar espacios múltiples
-    text = re.sub(r"\s{2,}", " ", text)
+    # 10. Normalizar espacios (NO tocar saltos de línea)
+    text = re.sub(r" {2,}", " ", text)
     
-    # 7. Limpiar espacios al inicio/final
+    # 11. Limpiar saltos de línea excesivos
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    
+    # 12. Limpiar espacios
     text = text.strip()
     
-    # 8. Limitar número de oraciones (pero no cortar en medio de listas)
-    if "•" not in text and max_sentences < 20:
-        sents = re.split(r"(?<=[\.\?\!])\s+", text)
-        if len(sents) > max_sentences:
-            text = " ".join(sents[:max_sentences]).strip()
-    
-    # 9. Asegurar punto final
-    if text and text[-1] not in ".!?":
+    # 13. Asegurar punto final
+    if text and text[-1] not in ".!?\n":
         text += "."
     
     return text
