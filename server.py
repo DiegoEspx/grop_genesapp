@@ -10,6 +10,8 @@ load_dotenv(override=True)
 from rag_core import (
     upsert_document, generate_answer,
     delete_document, doc_stats, list_docs,
+    # --> NUEVA IMPORTACIÓN: Función para recargar los metadatos
+    reload_all_metadata, 
 )
 
 app = FastAPI(title="Groq RAG Server", docs_url="/swagger")
@@ -17,7 +19,7 @@ app = FastAPI(title="Groq RAG Server", docs_url="/swagger")
 # -------- MODELOS --------
 class ChatRequest(BaseModel):
     message: str
-    topic: str | None = None       
+    topic: str | None = None      
     lang: str | None = "es"        
 
 class ChatResponse(BaseModel):
@@ -25,7 +27,34 @@ class ChatResponse(BaseModel):
     citations: list | None = None
     citations_apa: list | None = None
 
-# -------- ENDPOINTS --------
+# -------- ENDPOINTS DE ADMINISTRACIÓN DE DATOS --------
+
+@app.post("/admin/reload-metadata")
+def admin_reload():
+    """
+    Endpoint de administración.
+    Recarga los metadatos de enfermedades y reconstruye el índice RAG
+    después de cambios manuales en Supabase (ej: añadir la enfermedad de Turner).
+    """
+    import logging
+    log = logging.getLogger("uvicorn.error")
+    
+    log.info("📢 Solicitud de recarga manual recibida.")
+    
+    try:
+        success = reload_all_metadata() # Llama a la función que actualiza la data en memoria
+        if success:
+            return {"status": "success", "message": "Metadatos y RAG index recargados en caliente (Hot Reload)."}
+        else:
+            return {"status": "error", "message": "La función de recarga terminó sin éxito."}
+    except Exception as e:
+        log.error(f"❌ Error al recargar metadatos: {e}")
+        import traceback
+        traceback.print_exc()
+        return {"status": "error", "message": f"Error interno durante la recarga: {str(e)}"}
+
+# -------- ENDPOINTS GENERALES --------
+
 @app.get("/health")
 def health():
     return {"status": "ok", "backend": "groq", "storage": "supabase"}
@@ -155,7 +184,7 @@ def docs_delete(doc_id: str):
         return {"ok": False, "error": str(e)}
 
 
-# -------- NUEVOS ENDPOINTS PARA GESTIÓN DE PROMPTS --------
+# -------- ENDPOINTS PARA GESTIÓN DE PROMPTS Y CONFIGURACIÓN --------
 from supabase_client import get_prompt, update_prompt, get_config, update_config
 
 @app.get("/admin/prompts")

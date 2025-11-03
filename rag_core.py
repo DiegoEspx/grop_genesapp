@@ -11,17 +11,41 @@ from supabase_client import (
     upsert_document_chunks, 
     delete_document as sb_delete, list_documents as sb_list, get_document_stats as sb_stats,
     load_all_chunks_for_indexing,
-    load_diseases, get_allowed_topics, refresh_diseases_cache  # ← NUEVO
+    # Funciones de enfermedad importadas
+    load_diseases, get_allowed_topics, refresh_diseases_cache 
 )
 
 # --- Configuración base ---
 log = logging.getLogger("uvicorn.error")
 _LLM_CLIENT, _LLM_BACKEND, _LLM_MODEL = build_llm_from_env()
 
+# 💾 FUNCIONES DE GESTIÓN Y ADMINISTRACIÓN
+# ============================================
 
-# ============================================
-# 🧠 LÓGICA BM25 EN MEMORIA
-# ============================================
+# ... (tus funciones upsert_document, _chunk_text, etc.) ...
+
+# Nueva función para actualizar en caliente:
+def reload_all_metadata():
+    """
+    Función administrativa para refrescar el caché de enfermedades 
+    y reconstruir el índice BM25 después de un cambio en la DB (Supabase).
+    """
+    log.info("Iniciando recarga manual de metadatos...")
+    
+    # 1. Fuerza el refresco del caché en supabase_client
+    refresh_diseases_cache()
+    
+    # 2. Recarga los metadatos de enfermedades en memoria (_DISEASE_ALIASES, etc.)
+    # El flag force_refresh=True asegura que se use la data recién traída.
+    _load_disease_metadata(force_refresh=True)
+    
+    # 3. Reconstruye el índice BM25
+    build_bm25_index()
+    
+    log.info("✅ Recarga de metadatos completa.")
+    return True
+
+#LÓGICA BM25 EN MEMORIA
 _LOCK = threading.Lock()
 _BM25_INDEX: BM25Okapi | None = None
 _BM25_METAS: List[Dict] = []
@@ -42,12 +66,12 @@ def build_bm25_index():
     """Carga datos de Supabase y construye el índice BM25 en memoria."""
     global _BM25_INDEX, _BM25_METAS, _LOCK
     
-    log.info("🔄 Iniciando carga e índice BM25 desde Supabase...")
+    log.info("Iniciando carga e índice BM25 desde Supabase...")
     
     chunks = load_all_chunks_for_indexing()
     
     if not chunks:
-        log.warning("⚠️ No se encontraron chunks en Supabase para indexar. El índice estará vacío.")
+        log.warning("No se encontraron chunks en Supabase para indexar. El índice estará vacío.")
         _BM25_INDEX = None
         _BM25_METAS = []
         return
@@ -60,18 +84,18 @@ def build_bm25_index():
         ]
         
         if not tokenized_corpus:
-             log.error("❌ Los chunks cargados no tienen tokens válidos para BM25.")
+             log.error("Los chunks cargados no tienen tokens válidos para BM25.")
              return
              
         _BM25_INDEX = BM25Okapi(tokenized_corpus)
         
-    log.info(f"✅ Índice BM25 construido con {len(_BM25_METAS)} chunks.")
+    log.info(f"Índice BM25 construido con {len(_BM25_METAS)} chunks.")
 
 
 def query_bm25_index(query_text: str, k: int, where: Dict) -> Tuple[List[Dict], List[Dict]]:
     """Busca en el índice BM25 en memoria y aplica filtros de metadatos."""
     if _BM25_INDEX is None:
-        log.error("❌ Índice BM25 no inicializado. Se intentará construir.")
+        log.error("Índice BM25 no inicializado. Se intentará construir.")
         build_bm25_index() 
         if _BM25_INDEX is None:
             return [], []
@@ -100,43 +124,6 @@ def query_bm25_index(query_text: str, k: int, where: Dict) -> Tuple[List[Dict], 
             
     return picked_metas, picked_metas
 
-
-# ============================================
-# 🧬 RECONOCIMIENTO DE TEMAS Y VALIDACIÓN
-# ============================================
-
-# ✅ TOPICS PERMITIDOS (lo que el sistema REALMENTE soporta)
-ALLOWED_TOPICS = {"down", "williams", "mps"}
-
-# Aliases más específicos y estrictos
-_DISEASE_ALIASES = {
-    r"\bdown\b": "down",
-    r"\bs(?:í|i)ndrome\s+de\s+down\b": "down",
-    r"\btrisom(?:í|i)a\s+21\b": "down",
-    
-    r"\bwilliams\b": "williams",
-    r"\bs(?:í|i)ndrome\s+de\s+williams\b": "williams",
-    r"\bwilliams[-\s]beuren\b": "williams",
-    
-    r"\bmps\b": "mps",
-    r"\bmucopolisacaridos(?:is|es)?\b": "mps",
-    r"\bmucopolisacaridosis\b": "mps",
-    r"\bhurler\b": "mps",
-    r"\bhunter\b": "mps",
-    r"\bsanfilippo\b": "mps",
-    r"\bmorquio\b": "mps",
-}
-
-# ✅ PALABRAS ESPECÍFICAS de las 3 condiciones
-_CONDITION_SPECIFIC_KEYWORDS = {
-    # Down
-    "trisomía", "trisomia", "cromosoma 21", "cariotipo",
-    # Williams
-    "elastina", "estenosis aórtica", "hipercalcemia",
-    # MPS
-    "glicosaminoglicanos", "lisosoma", "enzimática", "enzimatica",
-}
-
 _GREET_WORDS = {
     "hola", "buenas", "buenos días", "buenas tardes", "buenas noches",
     "hey", "hi", "hello", "qué tal", "que tal", "saludos"
@@ -147,11 +134,48 @@ _SMALLTALK_WORDS = {
     "cómo va", "como va", "gracias", "ok", "vale", "genial"
 }
 
+# --- LÓGICA DINÁMICA DE ENFERMEDADES ---
+_DISEASE_ALIASES: Dict[str, str] = {}
+_CONDITION_SPECIFIC_KEYWORDS: set[str] = set()
+_TOPIC_NAMES: Dict[str, str] = {} # Para el prompt del sistema
+
+def _load_disease_metadata(force_refresh: bool = False):
+    """Carga los aliases, keywords y nombres desde la BD."""
+    global _DISEASE_ALIASES, _CONDITION_SPECIFIC_KEYWORDS, _TOPIC_NAMES
+    
+    # load_diseases está importada de supabase_client.py
+    diseases = load_diseases(force_refresh=force_refresh) 
+    
+    new_aliases = {}
+    new_keywords = set()
+    new_names = {}
+
+    for id, data in diseases.items():
+        # 1. Alias para _extract_topic (usa re.escape para evitar problemas con símbolos)
+        for alias in data.get("aliases", []):
+            new_aliases[rf"\b{re.escape(alias)}\b"] = id
+        
+        # 2. Keywords para _is_specific_rare_disease_query
+        for keyword in data.get("keywords", []):
+            new_keywords.add(keyword.lower())
+            
+        # 3. Nombres para el prompt (Paso 7 de generate_answer)
+        new_names[id] = data.get("name", id)
+
+    _DISEASE_ALIASES = new_aliases
+    _CONDITION_SPECIFIC_KEYWORDS = new_keywords
+    _TOPIC_NAMES = new_names
+    log.info(f"✅ Metadatos de {len(diseases)} enfermedades cargados dinámicamente.")
+
+
+# Inicializar los metadatos al cargar el módulo
+_load_disease_metadata()
 
 def _extract_topic(text: str) -> str | None:
     """Extrae el topic de enfermedades raras del texto."""
     t = text.lower()
-    for pat, topic in _DISEASE_ALIASES.items():
+    # Usa la variable global cargada dinámicamente
+    for pat, topic in _DISEASE_ALIASES.items(): 
         if re.search(pat, t):
             return topic
     return None
@@ -173,88 +197,59 @@ def _is_specific_rare_disease_query(text: str) -> bool:
     Retorna True SOLO si hay evidencia clara del dominio.
     """
     t = text.lower()
-    
+
     # 1. ¿Menciona explícitamente alguna condición?
     if _extract_topic(t):
         return True
     
     # 2. ¿Contiene términos médicos específicos de estas condiciones?
-    if any(kw in t for kw in _CONDITION_SPECIFIC_KEYWORDS):
+    if any(kw in t for kw in _CONDITION_SPECIFIC_KEYWORDS): 
         return True
-    
-    # 3. ¿Combina "síndrome/enfermedad" + término médico relevante?
+
+    # 3. ¿Combina "síndrome/enfermedad" + término médico relevante? (Reincorporado)
     if re.search(r"\b(s[ií]ndrome|enfermedad)\b", t):
         medical_terms = ["gen[ée]tic", "cromosoma", "cong[ée]nit", "raro"]
         if any(re.search(term, t) for term in medical_terms):
             return True
-    
+        
     return False
 
 
-def _tidy_output(text: str) -> str:
+def _tidy_output(text: str, max_sentences: int = 15) -> str:
     """
-    Limpia y formatea la salida del LLM, preservando el formato **Markdown** para su correcta renderización en la aplicación Flutter.
+    Limpia y formatea la salida del LLM, preservando el formato **Markdown**     y limitando la longitud.
     """
+    # ... (Tu lógica de limpieza permanece igual) ...
     if not text:
         return text
         
-    # 1. 💡 REINTRODUCIR LA LÍNEA MODIFICADA: Convertir las mayúsculas con doble asterisco
-    # y DOBLE DOS PUNTOS a solo **negrita** (eliminando los :: que causan problemas)
-    # Ejemplo: **TITULO::** -> **TITULO**
     text = re.sub(r"\*\*([^*]+?)\:\s*\*\*", r"\*\* \1\*\*", text)
-    # Ejemplo: **TITULO::** -> **TITULO**
     text = re.sub(r"\*\*([^*]+)\:\s*([^\*])", r"**\1** \2", text)
-    # Ejemplo: **TITULO**:: -> **TITULO**
     text = re.sub(r"\*\*([^*]+)\*\*::", r"**\1**", text)
-    
-    # Si quieres que el texto siempre sea en mayúsculas y negrita, usa:
-    # text = re.sub(r"\*\*([^*]+)\*\*", lambda m: f"**{m.group(1).strip().upper()}**", text)
-
-    # 2. Limpiar asteriscos simples (si quedaron)
     text = re.sub(r"\*([^*]+)\*", r"\1", text)
-    
-    # 3. Normalizar viñetas (esto está bien, crea Markdown de lista: "- ")
-    # Cambia el bullet point a * para que sea Markdown
     text = re.sub(r"^\s*[\*\-]\s+", "* ", text, flags=re.MULTILINE)
-    
-    # 4. Asegurar saltos de línea ANTES de títulos/secciones
     text = re.sub(r"([a-z])\s*\n([A-ZÁÉÍÓÚÑ]{2,}[^a-z])", r"\1\n\n\2", text)
-    
-    # 5. Asegurar salto de línea ANTES de listas
-    # Cambiamos • por *
     text = re.sub(r"([^\n])\n(\*)", r"\1\n\n\2", text)
-    
-    # 6. Asegurar salto después de dos puntos seguidos de lista
-    # Cambiamos • por *
     text = re.sub(r":\s*(\*)", r":\n\n\1", text)
-    
-    # 7. CORREGIR "de. Down" → "de Down"
     text = re.sub(r"([a-záéíóúüñ])\.\s+([A-ZÁÉÍÓÚÑ])", r"\1 \2", text)
-    
-    # 8. Corregir espacios antes de puntuación
     text = re.sub(r"\s+([.,;:!?])", r"\1", text)
-    
-    # 9. Limpiar puntos al inicio de línea
     text = re.sub(r"^\s*\.\s*", "", text, flags=re.MULTILINE)
-    
-    # 10. Normalizar espacios (NO tocar saltos de línea)
     text = re.sub(r" {2,}", " ", text)
-    
-    # 11. Limpiar saltos de línea excesivos
     text = re.sub(r"\n{3,}", "\n\n", text)
-    
-    # 12. Limpiar espacios
     text = text.strip()
     
-    # 13. Asegurar punto final
+    # 💡 Límite de oraciones
+    sentences = re.split(r"([.!?])\s+", text)
+    if len(sentences) > (max_sentences * 2):
+        # Reconstruir hasta el límite
+        text = "".join(sentences[:max_sentences * 2 - 1]) 
+    
     if text and text[-1] not in ".!?\n":
         text += "."
     
     return text
 
-# ============================================
 # GENERACIÓN DE RESPUESTA CON LÍMITES ESTRICTOS
-# ============================================
 def generate_answer(user_msg: str,
                     topic: str | None = None,
                     min_year: int | None = None,
@@ -269,19 +264,25 @@ def generate_answer(user_msg: str,
     llm_params = get_config("llm_params", {
         "temperature": 0.35, "max_tokens": 450, "top_p": 0.92, "max_sentences": 15
     })
+    
+    # 💡 Obtener los nombres de tópicos dinámicamente para mensajes
+    topic_list_names = ", ".join(_TOPIC_NAMES.values())
 
     # 1️⃣ SMALL-TALK / SALUDO
     if _is_smalltalk(t):
         greeting = get_prompt("greeting", 
-            "¡Hola! Soy Gemi, tu asistente especializado en enfermedades raras: síndrome de Down, Williams y mucopolisacaridosis (MPS). ¿En qué puedo ayudarte?")
+            f"¡Hola! Soy Gemi, tu asistente especializado en enfermedades raras: {topic_list_names}. ¿En qué puedo ayudarte?")
         return (greeting, [], [])
 
     # 2️⃣ EXTRAER Y VALIDAR TOPIC
     inferred_topic = _extract_topic(t)
     effective_topic = topic or inferred_topic
     
+    # 💡 Obtener la lista de tópicos permitidos DE LA BASE DE DATOS (Soluciona "not defined")
+    current_allowed_topics = get_allowed_topics()
+    
     # ✅ VALIDACIÓN CRÍTICA: ¿El topic está permitido?
-    if effective_topic and effective_topic not in ALLOWED_TOPICS:
+    if effective_topic and effective_topic not in current_allowed_topics: 
         log.warning(f"⚠️ Topic '{effective_topic}' no está en ALLOWED_TOPICS")
         effective_topic = None
 
@@ -291,7 +292,7 @@ def generate_answer(user_msg: str,
     # ❌ RECHAZAR si no hay evidencia del dominio
     if not is_rare_disease_query and not effective_topic:
         out_of_scope = get_prompt("out_of_scope", 
-            "Lo siento, solo puedo ayudarte con información sobre enfermedades raras específicas: síndrome de Down, síndrome de Williams y mucopolisacaridosis (MPS). "
+            f"Lo siento, solo puedo ayudarte con información sobre enfermedades raras específicas: {topic_list_names}. "
             "¿Tienes alguna pregunta sobre alguna de estas condiciones?")
         log.info(f"🚫 Consulta fuera de alcance: '{t[:50]}...'")
         return (out_of_scope, [], [])
@@ -299,7 +300,7 @@ def generate_answer(user_msg: str,
     # 4️⃣ SI NO HAY TOPIC pero SÍ es consulta médica → pedir clarificación
     if not effective_topic:
         no_topic_msg = get_prompt("no_topic", 
-            "Puedo ayudarte con información sobre síndrome de Down, Williams o mucopolisacaridosis (MPS). "
+            f"Puedo ayudarte con información sobre {topic_list_names}. "
             "¿Podrías indicarme sobre cuál de estas condiciones te gustaría información?")
         return (no_topic_msg, [], [])
 
@@ -326,18 +327,15 @@ def generate_answer(user_msg: str,
     system_prompt = get_prompt("system_main", 
         "Eres Gemi, un asistente médico educativo especializado ÚNICAMENTE en enfermedades raras.")
     
-    # ✅ AÑADIR RESTRICCIÓN EXPLÍCITA
-    system_prompt += f"\n\n⚠️ RESTRICCIÓN CRÍTICA: Solo responde preguntas sobre síndrome de Down, Williams y mucopolisacaridosis (MPS). Si te preguntan sobre otros temas, indica educadamente que solo puedes ayudar con estas tres condiciones."
+    # ✅ AÑADIR RESTRICCIÓN EXPLÍCITA (Usando la lista dinámica)
+    system_prompt += f"\n\n RESTRICCIÓN CRÍTICA: Solo responde preguntas sobre {topic_list_names}. Si te preguntan sobre otros temas, indica educadamente que solo puedes ayudar con estas condiciones."
     
     if effective_topic:
-        topic_names = {
-            "down": "Síndrome de Down",
-            "williams": "Síndrome de Williams",
-            "mps": "Mucopolisacaridosis (MPS)"
-        }
-        system_prompt += f"\n\nTEMA ACTUAL: {topic_names.get(effective_topic, effective_topic)}"
+        # Usar el mapa de nombres dinámico
+        topic_name = _TOPIC_NAMES.get(effective_topic, effective_topic)
+        system_prompt += f"\n\nTEMA ACTUAL: {topic_name}"
 
-    # 8️⃣ PREPARAR CONTEXTO DE DOCUMENTOS
+    # PREPARAR CONTEXTO DE DOCUMENTOS
     if chunks:
         ctx_lines = []
         for i, chunk in enumerate(chunks, 1):
@@ -345,7 +343,7 @@ def generate_answer(user_msg: str,
         rag_text = "\n".join(ctx_lines)
         context_section = f"\n\nDOCUMENTOS DE REFERENCIA:\n{rag_text}"
     else:
-        context_section = "\n\nNOTA: No hay documentos específicos cargados para este tema, pero usa tu conocimiento médico general SOLO sobre las tres condiciones permitidas."
+        context_section = "\n\nNOTA: No hay documentos específicos cargados para este tema, pero usa tu conocimiento médico general SOLO sobre las condiciones permitidas."
 
     messages = [
         {"role": "system", "content": system_prompt + context_section},
@@ -410,9 +408,12 @@ def upsert_document(doc_id: str, source: str, full_text: str,
                     overlap: int = 180) -> int:
     """Inserta documento chunkeado en Supabase."""
     
+    # 💡 Obtener la lista de tópicos permitidos DE LA BASE DE DATOS (Soluciona "not defined")
+    current_allowed_topics = get_allowed_topics()
+    
     # ✅ VALIDAR TOPIC ANTES DE INSERTAR
-    if topic and topic not in ALLOWED_TOPICS:
-        log.error(f"❌ Topic '{topic}' no permitido. Solo se aceptan: {ALLOWED_TOPICS}")
+    if topic and topic not in current_allowed_topics:
+        log.error(f"❌ Topic '{topic}' no permitido. Solo se aceptan: {current_allowed_topics}")
         return 0
     
     log.info(f"🔄 Iniciando upsert_document para '{doc_id}'")
