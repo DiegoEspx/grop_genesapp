@@ -3,15 +3,12 @@ import re, logging
 from typing import List, Dict, Tuple, Any
 import threading
 from rank_bm25 import BM25Okapi
-import re
-
 from llm_client import build_llm_from_env
 from supabase_client import (
     get_prompt, get_config,
     upsert_document_chunks, 
     delete_document as sb_delete, list_documents as sb_list, get_document_stats as sb_stats,
     load_all_chunks_for_indexing,
-    # Funciones de enfermedad importadas
     load_diseases, get_allowed_topics, refresh_diseases_cache 
 )
 
@@ -19,48 +16,19 @@ from supabase_client import (
 log = logging.getLogger("uvicorn.error")
 _LLM_CLIENT, _LLM_BACKEND, _LLM_MODEL = build_llm_from_env()
 
-# 💾 FUNCIONES DE GESTIÓN Y ADMINISTRACIÓN
-# ============================================
+# FUNCIONES DE GESTIÓN Y ADMINISTRACIÓN
 
-# ... (tus funciones upsert_document, _chunk_text, etc.) ...
-
-# Nueva función para actualizar en caliente:
-def reload_all_metadata():
-    """
-    Función administrativa para refrescar el caché de enfermedades 
-    y reconstruir el índice BM25 después de un cambio en la DB (Supabase).
-    """
-    log.info("Iniciando recarga manual de metadatos...")
-    
-    # 1. Fuerza el refresco del caché en supabase_client
-    refresh_diseases_cache()
-    
-    # 2. Recarga los metadatos de enfermedades en memoria (_DISEASE_ALIASES, etc.)
-    # El flag force_refresh=True asegura que se use la data recién traída.
-    _load_disease_metadata(force_refresh=True)
-    
-    # 3. Reconstruye el índice BM25
-    build_bm25_index()
-    
-    log.info("✅ Recarga de metadatos completa.")
-    return True
-
-#LÓGICA BM25 EN MEMORIA
 _LOCK = threading.Lock()
 _BM25_INDEX: BM25Okapi | None = None
 _BM25_METAS: List[Dict] = []
 
-
 def _chat(messages, model, **opts):
     return _LLM_CLIENT.chat(messages, **opts)
 
-
-# --- Tokenización simple para BM25 ---
 _WORD = re.compile(r"[A-Za-zÁÉÍÓÚÜÑáéíóúüñ0-9]+", re.UNICODE)
 
 def _tokenize(text: str) -> List[str]:
     return [m.group(0).lower() for m in _WORD.finditer(text)]
-
 
 def build_bm25_index():
     """Carga datos de Supabase y construye el índice BM25 en memoria."""
@@ -84,13 +52,11 @@ def build_bm25_index():
         ]
         
         if not tokenized_corpus:
-             log.error("Los chunks cargados no tienen tokens válidos para BM25.")
-             return
-             
+                log.error("Los chunks cargados no tienen tokens válidos para BM25.")
+                return
         _BM25_INDEX = BM25Okapi(tokenized_corpus)
         
     log.info(f"Índice BM25 construido con {len(_BM25_METAS)} chunks.")
-
 
 def query_bm25_index(query_text: str, k: int, where: Dict) -> Tuple[List[Dict], List[Dict]]:
     """Busca en el índice BM25 en memoria y aplica filtros de metadatos."""
@@ -137,44 +103,40 @@ _SMALLTALK_WORDS = {
 # --- LÓGICA DINÁMICA DE ENFERMEDADES ---
 _DISEASE_ALIASES: Dict[str, str] = {}
 _CONDITION_SPECIFIC_KEYWORDS: set[str] = set()
-_TOPIC_NAMES: Dict[str, str] = {} # Para el prompt del sistema
+_TOPIC_NAMES: Dict[str, str] = {} 
+
+from supabase_client import load_diseases
 
 def _load_disease_metadata(force_refresh: bool = False):
-    """Carga los aliases, keywords y nombres desde la BD."""
-    global _DISEASE_ALIASES, _CONDITION_SPECIFIC_KEYWORDS, _TOPIC_NAMES
-    
-    # load_diseases está importada de supabase_client.py
-    diseases = load_diseases(force_refresh=force_refresh) 
-    
-    new_aliases = {}
-    new_keywords = set()
-    new_names = {}
+    """
+    Carga los metadatos de enfermedades EXCLUSIVAMENTE desde la tabla 'diseases' en Supabase.
+    """
+    global DISEASES_CACHE
 
-    for id, data in diseases.items():
-        # 1. Alias para _extract_topic (usa re.escape para evitar problemas con símbolos)
-        for alias in data.get("aliases", []):
-            new_aliases[rf"\b{re.escape(alias)}\b"] = id
-        
-        # 2. Keywords para _is_specific_rare_disease_query
-        for keyword in data.get("keywords", []):
-            new_keywords.add(keyword.lower())
-            
-        # 3. Nombres para el prompt (Paso 7 de generate_answer)
-        new_names[id] = data.get("name", id)
+    diseases = load_diseases(force_refresh=force_refresh)
+    DISEASES_CACHE = {}
 
-    _DISEASE_ALIASES = new_aliases
-    _CONDITION_SPECIFIC_KEYWORDS = new_keywords
-    _TOPIC_NAMES = new_names
-    log.info(f"✅ Metadatos de {len(diseases)} enfermedades cargados dinámicamente.")
+    for d in diseases.values():
+        if not d.get("is_active", True):
+            continue
 
+        disease_id = d["id"]
+        aliases = [a.lower() for a in d.get("aliases", [])]
+        keywords = [k.lower() for k in d.get("keywords", [])]
+        name = d["name"].lower()
 
-# Inicializar los metadatos al cargar el módulo
-_load_disease_metadata()
+        DISEASES_CACHE[disease_id] = {
+            "name": name,
+            "aliases": aliases,
+            "keywords": keywords
+        }
+
+    log.info(f"✅ Cargadas {len(DISEASES_CACHE)} enfermedades desde Supabase.")
+
 
 def _extract_topic(text: str) -> str | None:
     """Extrae el topic de enfermedades raras del texto."""
     t = text.lower()
-    # Usa la variable global cargada dinámicamente
     for pat, topic in _DISEASE_ALIASES.items(): 
         if re.search(pat, t):
             return topic
@@ -184,7 +146,6 @@ def _extract_topic(text: str) -> str | None:
 def _is_smalltalk(t: str) -> bool:
     """Detecta si es un saludo o conversación casual."""
     t = t.lower().strip()
-    # Si el mensaje es muy corto y contiene palabras de saludo
     words = set(t.split())
     if len(words) <= 5 and any(w in _GREET_WORDS | _SMALLTALK_WORDS for w in words):
         return True
@@ -197,7 +158,6 @@ def _is_specific_rare_disease_query(text: str) -> bool:
     Retorna True SOLO si hay evidencia clara del dominio.
     """
     t = text.lower()
-
     # 1. ¿Menciona explícitamente alguna condición?
     if _extract_topic(t):
         return True
@@ -206,7 +166,7 @@ def _is_specific_rare_disease_query(text: str) -> bool:
     if any(kw in t for kw in _CONDITION_SPECIFIC_KEYWORDS): 
         return True
 
-    # 3. ¿Combina "síndrome/enfermedad" + término médico relevante? (Reincorporado)
+    # 3. ¿Combina "síndrome/enfermedad" + término médico relevante?
     if re.search(r"\b(s[ií]ndrome|enfermedad)\b", t):
         medical_terms = ["gen[ée]tic", "cromosoma", "cong[ée]nit", "raro"]
         if any(re.search(term, t) for term in medical_terms):
@@ -219,7 +179,6 @@ def _tidy_output(text: str, max_sentences: int = 15) -> str:
     """
     Limpia y formatea la salida del LLM, preservando el formato **Markdown**     y limitando la longitud.
     """
-    # ... (Tu lógica de limpieza permanece igual) ...
     if not text:
         return text
         
@@ -238,10 +197,8 @@ def _tidy_output(text: str, max_sentences: int = 15) -> str:
     text = re.sub(r"\n{3,}", "\n\n", text)
     text = text.strip()
     
-    # 💡 Límite de oraciones
     sentences = re.split(r"([.!?])\s+", text)
     if len(sentences) > (max_sentences * 2):
-        # Reconstruir hasta el límite
         text = "".join(sentences[:max_sentences * 2 - 1]) 
     
     if text and text[-1] not in ".!?\n":
@@ -257,65 +214,54 @@ def generate_answer(user_msg: str,
                     lang: str | None = None):
     """
     Genera respuesta con validación estricta del dominio.
+    Usa DISEASES_CACHE, _TOPIC_NAMES y _DISEASE_ALIASES cargadas desde Supabase.
     """
     t = (user_msg or "").strip()
 
-    # Obtener configuración desde BD
+    # Configuración dinámica
     llm_params = get_config("llm_params", {
         "temperature": 0.35, "max_tokens": 450, "top_p": 0.92, "max_sentences": 15
     })
     
-    # 💡 Obtener los nombres de tópicos dinámicamente para mensajes
+    # Lista de nombres de topics para prompts
     topic_list_names = ", ".join(_TOPIC_NAMES.values())
 
-    # 1️⃣ SMALL-TALK / SALUDO
+    # Small talk
     if _is_smalltalk(t):
         greeting = get_prompt("greeting", 
             f"¡Hola! Soy Gemi, tu asistente especializado en enfermedades raras: {topic_list_names}. ¿En qué puedo ayudarte?")
-        return (greeting, [], [])
+        return greeting, [], []
 
-    # 2️⃣ EXTRAER Y VALIDAR TOPIC
+    # Extraer topic de texto y validar contra allowed
     inferred_topic = _extract_topic(t)
     effective_topic = topic or inferred_topic
-    
-    # 💡 Obtener la lista de tópicos permitidos DE LA BASE DE DATOS (Soluciona "not defined")
     current_allowed_topics = get_allowed_topics()
-    
-    # ✅ VALIDACIÓN CRÍTICA: ¿El topic está permitido?
-    if effective_topic and effective_topic not in current_allowed_topics: 
-        log.warning(f"⚠️ Topic '{effective_topic}' no está en ALLOWED_TOPICS")
+    if effective_topic and effective_topic not in current_allowed_topics:
+        log.warning(f"⚠️ Topic '{effective_topic}' no está permitido")
         effective_topic = None
 
-    # 3️⃣ VERIFICAR SI LA CONSULTA ES DEL DOMINIO
+    # Verificar si es consulta de dominio
     is_rare_disease_query = _is_specific_rare_disease_query(t)
-    
-    # ❌ RECHAZAR si no hay evidencia del dominio
     if not is_rare_disease_query and not effective_topic:
         out_of_scope = get_prompt("out_of_scope", 
-            f"Lo siento, solo puedo ayudarte con información sobre enfermedades raras específicas: {topic_list_names}. "
-            "¿Tienes alguna pregunta sobre alguna de estas condiciones?")
+            f"Lo siento, solo puedo ayudarte con información sobre enfermedades raras específicas: {topic_list_names}.")
         log.info(f"🚫 Consulta fuera de alcance: '{t[:50]}...'")
-        return (out_of_scope, [], [])
+        return out_of_scope, [], []
 
-    # 4️⃣ SI NO HAY TOPIC pero SÍ es consulta médica → pedir clarificación
+    # Pedir clarificación si no hay topic
     if not effective_topic:
         no_topic_msg = get_prompt("no_topic", 
-            f"Puedo ayudarte con información sobre {topic_list_names}. "
-            "¿Podrías indicarme sobre cuál de estas condiciones te gustaría información?")
-        return (no_topic_msg, [], [])
+            f"Puedo ayudarte con información sobre {topic_list_names}. ¿Podrías indicarme cuál te interesa?")
+        return no_topic_msg, [], []
 
-    # 5️⃣ CONSTRUIR FILTROS PARA RAG
+    # Construir filtros para BM25
     where = {}
-    if effective_topic:
-        where["topic"] = effective_topic
-    if lang:
-        where["lang"] = lang
-    if min_year:
-        where["min_year"] = min_year
-    if types:
-        where["type"] = types[0] if len(types) == 1 else types
+    if effective_topic: where["topic"] = effective_topic
+    if lang: where["lang"] = lang
+    if min_year: where["min_year"] = min_year
+    if types: where["type"] = types[0] if len(types) == 1 else types
 
-    # 6️⃣ CONSULTAR BM25
+    # Consultar BM25
     rag_params = get_config("rag_params", {"k_results": 5})
     chunks, metas = query_bm25_index(
         query_text=t,
@@ -323,55 +269,43 @@ def generate_answer(user_msg: str,
         where=where if where else {}
     )
 
-    # 7️⃣ CONSTRUIR PROMPT DEL SISTEMA CON RESTRICCIONES
+    # Construir prompt del sistema
     system_prompt = get_prompt("system_main", 
-        "Eres Gemi, un asistente médico educativo especializado ÚNICAMENTE en enfermedades raras.")
-    
-    # ✅ AÑADIR RESTRICCIÓN EXPLÍCITA (Usando la lista dinámica)
-    system_prompt += f"\n\n RESTRICCIÓN CRÍTICA: Solo responde preguntas sobre {topic_list_names}. Si te preguntan sobre otros temas, indica educadamente que solo puedes ayudar con estas condiciones."
-    
+        "Eres Gemi, asistente educativo especializado ÚNICAMENTE en enfermedades raras.")
+    system_prompt += f"\n\nRESTRICCIÓN: Solo responde sobre {topic_list_names}."
     if effective_topic:
-        # Usar el mapa de nombres dinámico
         topic_name = _TOPIC_NAMES.get(effective_topic, effective_topic)
-        system_prompt += f"\n\nTEMA ACTUAL: {topic_name}"
+        system_prompt += f"\nTEMA ACTUAL: {topic_name}"
 
-    # PREPARAR CONTEXTO DE DOCUMENTOS
+    # Contexto de documentos
     if chunks:
-        ctx_lines = []
-        for i, chunk in enumerate(chunks, 1):
-            ctx_lines.append(f"[{i}] {chunk['content']}")
-        rag_text = "\n".join(ctx_lines)
-        context_section = f"\n\nDOCUMENTOS DE REFERENCIA:\n{rag_text}"
+        context_section = "\n\nDOCUMENTOS DE REFERENCIA:\n" + "\n".join(f"[{i+1}] {c['content']}" for i, c in enumerate(chunks))
     else:
-        context_section = "\n\nNOTA: No hay documentos específicos cargados para este tema, pero usa tu conocimiento médico general SOLO sobre las condiciones permitidas."
+        context_section = "\n\nNOTA: No hay documentos cargados, usa solo tu conocimiento médico sobre las condiciones permitidas."
 
     messages = [
         {"role": "system", "content": system_prompt + context_section},
         {"role": "user", "content": t},
     ]
 
-    # 9️⃣ LLAMAR AL LLM
-    out = _chat(
-        messages, 
-        _LLM_MODEL,
-        temperature=llm_params.get("temperature", 0.35),
-        num_predict=llm_params.get("max_tokens", 450),
-        top_p=llm_params.get("top_p", 0.92)
-    )
+    # Llamar LLM
+    out = _chat(messages, _LLM_MODEL,
+                temperature=llm_params.get("temperature", 0.35),
+                num_predict=llm_params.get("max_tokens", 450),
+                top_p=llm_params.get("top_p", 0.92))
     
     raw = (out.get("message") or {}).get("content", "").strip()
     reply = _tidy_output(raw, max_sentences=llm_params.get("max_sentences", 15))
 
-    # 🔟 FORMATEAR CITAS APA
+    # Formatear citas APA
     citations_apa = _format_apa(metas) if metas else []
-    
-    # 1️⃣1️⃣ NOTA DE SEGURIDAD
+
+    # Nota de seguridad
     safety_note = get_prompt("safety_note", "")
     if reply and safety_note and not any(x in reply.lower() for x in ["consulta", "médico"]):
         reply += f"\n\n{safety_note}"
 
     return reply or "No pude generar una respuesta.", metas, citations_apa
-
 
 def _format_apa(metas: List[Dict], limit: int = 4) -> List[str]:
     """Formatea metadatos en citas APA."""
@@ -397,21 +331,17 @@ def _format_apa(metas: List[Dict], limit: int = 4) -> List[str]:
     
     return out
 
-
-# ============================================
-# 💾 FUNCIONES DE GESTIÓN DE DOCUMENTOS
-# ============================================
+# FUNCIONES DE GESTIÓN DE DOCUMENTOS
 def upsert_document(doc_id: str, source: str, full_text: str,
                     extra_meta: Dict | None = None,
                     topic: str | None = None,
                     chunk_size: int = 1100, 
                     overlap: int = 180) -> int:
     """Inserta documento chunkeado en Supabase."""
-    
-    # 💡 Obtener la lista de tópicos permitidos DE LA BASE DE DATOS (Soluciona "not defined")
+
     current_allowed_topics = get_allowed_topics()
     
-    # ✅ VALIDAR TOPIC ANTES DE INSERTAR
+    # VALIDAR TOPIC ANTES DE INSERTAR
     if topic and topic not in current_allowed_topics:
         log.error(f"❌ Topic '{topic}' no permitido. Solo se aceptan: {current_allowed_topics}")
         return 0
@@ -453,6 +383,12 @@ def upsert_document(doc_id: str, source: str, full_text: str,
     
     return result
 
+def reload_all_metadata():
+    refresh_diseases_cache()
+    _load_disease_metadata(force_refresh=True)
+    build_bm25_index()
+    log.info("✅ Recarga de metadatos completa.")
+    return True
 
 def _chunk_text(text: str, chunk_size: int, overlap: int) -> List[str]:
     """Divide texto en fragmentos."""
@@ -478,13 +414,8 @@ def _chunk_text(text: str, chunk_size: int, overlap: int) -> List[str]:
     
     return chunks
 
-
-# --- Reexportaciones ---
 delete_document = sb_delete
 list_docs = sb_list
 doc_stats = sb_stats
 
-# ============================================
-# ⚙️ INICIALIZACIÓN
-# ============================================
 build_bm25_index()

@@ -10,7 +10,6 @@ load_dotenv(override=True)
 from rag_core import (
     upsert_document, generate_answer,
     delete_document, doc_stats, list_docs,
-    # --> NUEVA IMPORTACIÓN: Función para recargar los metadatos
     reload_all_metadata, 
 )
 
@@ -42,7 +41,7 @@ def admin_reload():
     log.info("📢 Solicitud de recarga manual recibida.")
     
     try:
-        success = reload_all_metadata() # Llama a la función que actualiza la data en memoria
+        success = reload_all_metadata()
         if success:
             return {"status": "success", "message": "Metadatos y RAG index recargados en caliente (Hot Reload)."}
         else:
@@ -88,8 +87,6 @@ def ingest(
     """Ingesta de documentos PDF a Supabase."""
     import logging
     log = logging.getLogger("uvicorn.error")
-    
-    # Extraer texto del PDF
     name = file.filename or "unknown"
     doc_id = doc_id or name
     raw = file.file.read()
@@ -112,8 +109,6 @@ def ingest(
     except Exception as e:
         log.error(f"❌ Error leyendo PDF: {e}")
         return {"ok": False, "error": f"Error leyendo PDF: {str(e)}"}
-
-    # Limpiar metadatos (evita "string", "none", etc. de Swagger)
     def _clean(v):
         if v is None: 
             return None
@@ -132,12 +127,9 @@ def ingest(
         "source_name": name,
     }
     
-    # Eliminar None para que no vayan a Supabase
     meta = {k: v for k, v in meta.items() if v is not None}
     
     log.info(f"📋 Metadatos: {meta}")
-
-    # Insertar en Supabase vía rag_core
     try:
         count = upsert_document(
             doc_id=doc_id,
@@ -232,11 +224,9 @@ def update_config_endpoint(key: str, value: str = Form(...)):
     """Actualiza configuración."""
     import json
     try:
-        # Intenta parsear como JSON
         parsed = json.loads(value)
         success = update_config(key, parsed)
     except json.JSONDecodeError:
-        # Si no es JSON, guarda como string
         success = update_config(key, value)
     
     return {"ok": success, "key": key}

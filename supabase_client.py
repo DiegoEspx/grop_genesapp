@@ -1,10 +1,8 @@
 from __future__ import annotations
-import os, json, logging
-from typing import List, Dict, Tuple, Any
+import os, logging
+from typing import List, Dict, Any
 
 log = logging.getLogger("uvicorn.error")
-
-# Cliente Supabase singleton
 _supabase = None
 
 def get_supabase():
@@ -27,10 +25,7 @@ def get_supabase():
             raise
     return _supabase
 
-
-# ============================================
-# 🏥 GESTIÓN DE ENFERMEDADES
-# ============================================
+# GESTIÓN DE ENFERMEDADES
 _diseases_cache = None  # Cache de enfermedades
 
 def load_diseases(force_refresh: bool = False) -> Dict[str, Dict]:
@@ -39,8 +34,6 @@ def load_diseases(force_refresh: bool = False) -> Dict[str, Dict]:
     Retorna un dict con estructura: {id: {name, aliases, keywords}}
     """
     global _diseases_cache
-    
-    # Usar cache si existe y no se fuerza refresh
     if _diseases_cache is not None and not force_refresh:
         return _diseases_cache
     
@@ -49,15 +42,12 @@ def load_diseases(force_refresh: bool = False) -> Dict[str, Dict]:
         
         if not response.data:
             log.warning("⚠️ No hay enfermedades activas en la BD. Usando valores por defecto.")
-            # Fallback básico
             _diseases_cache = {
                 "down": {"name": "Síndrome de Down", "aliases": ["down"], "keywords": []},
                 "williams": {"name": "Síndrome de Williams", "aliases": ["williams"], "keywords": []},
                 "mps": {"name": "Mucopolisacaridosis", "aliases": ["mps"], "keywords": []}
             }
             return _diseases_cache
-        
-        # Construir diccionario desde la BD
         diseases = {}
         for row in response.data:
             diseases[row["id"]] = {
@@ -66,14 +56,12 @@ def load_diseases(force_refresh: bool = False) -> Dict[str, Dict]:
                 "keywords": row.get("keywords", []),
                 "description": row.get("description", "")
             }
-        
         _diseases_cache = diseases
         log.info(f"🏥 {len(diseases)} enfermedades cargadas desde BD: {list(diseases.keys())}")
         return diseases
         
     except Exception as e:
         log.error(f"❌ Error cargando enfermedades: {e}")
-        # Fallback en caso de error
         return {
             "down": {"name": "Síndrome de Down", "aliases": ["down"], "keywords": []},
             "williams": {"name": "Síndrome de Williams", "aliases": ["williams"], "keywords": []},
@@ -93,12 +81,8 @@ def refresh_diseases_cache():
     _diseases_cache = None
     return load_diseases(force_refresh=True)
 
-
-# ============================================
 # PROMPTS
-# ============================================
-_prompt_cache = {}  # Cache manual
-
+_prompt_cache = {}
 def get_prompt(name: str, default: str = "") -> str:
     """Obtiene un prompt de la BD."""
     if name in _prompt_cache:
@@ -132,10 +116,7 @@ def update_prompt(name: str, content: str) -> bool:
         log.error(f"❌ Error actualizando prompt '{name}': {e}")
         return False
 
-
-# ============================================
 # CONFIGURACIÓN
-# ============================================
 _config_cache = {}
 
 def get_config(key: str, default: Any = None) -> Any:
@@ -172,10 +153,7 @@ def update_config(key: str, value: Any) -> bool:
         log.error(f"❌ Error actualizando config '{key}': {e}")
         return False
 
-
-# ============================================
 # DOCUMENTOS
-# ============================================
 def upsert_document_chunks(doc_id: str, chunks: List[Dict]) -> int:
     """Inserta/actualiza chunks de documento en Supabase."""
     try:
