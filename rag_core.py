@@ -111,27 +111,38 @@ def _load_disease_metadata(force_refresh: bool = False):
     """
     Carga los metadatos de enfermedades EXCLUSIVAMENTE desde la tabla 'diseases' en Supabase.
     """
-    global DISEASES_CACHE
-
+    global _DISEASE_ALIASES, _CONDITION_SPECIFIC_KEYWORDS, _TOPIC_NAMES
+    
     diseases = load_diseases(force_refresh=force_refresh)
-    DISEASES_CACHE = {}
-
-    for d in diseases.values():
-        if not d.get("is_active", True):
+    
+    _DISEASE_ALIASES = {}
+    _CONDITION_SPECIFIC_KEYWORDS = set()
+    _TOPIC_NAMES = {}
+    
+    # diseases ya es un dict con formato {id: {name, aliases, keywords, ...}}
+    for disease_id, disease_data in diseases.items():
+        if not disease_data:
             continue
-
-        disease_id = d["id"]
-        aliases = [a.lower() for a in d.get("aliases", [])]
-        keywords = [k.lower() for k in d.get("keywords", [])]
-        name = d["name"].lower()
-
-        DISEASES_CACHE[disease_id] = {
-            "name": name,
-            "aliases": aliases,
-            "keywords": keywords
-        }
-
-    log.info(f"✅ Cargadas {len(DISEASES_CACHE)} enfermedades desde Supabase.")
+        
+        # Obtener datos de la enfermedad
+        name = disease_data.get("name", "").lower()
+        aliases = [a.lower() for a in disease_data.get("aliases", [])]
+        keywords = [k.lower() for k in disease_data.get("keywords", [])]
+        
+        # Guardar el nombre legible
+        _TOPIC_NAMES[disease_id] = disease_data.get("name", disease_id)
+        
+        # Crear patrones de búsqueda para aliases
+        for alias in aliases:
+            pattern = r"\b" + re.escape(alias) + r"\b"
+            _DISEASE_ALIASES[pattern] = disease_id
+        
+        # Agregar keywords al conjunto global
+        _CONDITION_SPECIFIC_KEYWORDS.update(keywords)
+    
+    log.info(f"✅ Cargados {len(_TOPIC_NAMES)} topics de enfermedades desde Supabase.")
+    log.info(f"🔍 {len(_DISEASE_ALIASES)} aliases configurados.")
+    log.info(f"🏷️  {len(_CONDITION_SPECIFIC_KEYWORDS)} keywords específicos.")
 
 
 def _extract_topic(text: str) -> str | None:
