@@ -11,7 +11,7 @@ from supabase_client import (
     load_all_chunks_for_indexing,
     load_diseases, get_allowed_topics, refresh_diseases_cache 
 )
-
+#diego
 # --- Configuración base ---
 log = logging.getLogger("uvicorn.error")
 _LLM_CLIENT, _LLM_BACKEND, _LLM_MODEL = build_llm_from_env()
