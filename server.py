@@ -22,10 +22,10 @@ app = FastAPI(title="Groq RAG Server", docs_url="/swagger")
 # Configurar CORS para permitir conexiones desde Flutter
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Permite todos los orígenes (para desarrollo)
+    allow_origins=["*"],
     allow_credentials=True,
-    allow_methods=["*"],  # Permite todos los métodos (GET, POST, etc.)
-    allow_headers=["*"],  # Permite todos los headers
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
 
